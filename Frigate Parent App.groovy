@@ -198,7 +198,8 @@ def handleEventMessage(String message) {
         // The "before" object contains the previous state (for "update" events)
         
         def eventType = event.type  // "new", "update", or "end"
-        def eventData = event.after ?: event  // Use "after" if present, otherwise assume direct format
+        // Frigate uses 'after' for new/update and 'before' for end
+        def eventData = (eventType == "end") ? (event.before ?: event) : (event.after ?: event)
         
         // Extract camera name and event ID
         def cameraName = eventData.camera
@@ -437,47 +438,21 @@ def refreshStats() {
 // These have been replaced with native MQTT via interfaces.mqtt
 
 def getCameraSnapshot(String cameraName) {
-    log.info "Frigate Parent App: Requesting snapshot for camera: ${cameraName}"
-    
+    log.info "Frigate Parent App: Setting snapshot URL for camera: ${cameraName}"
     try {
-        // Normalize camera name (strip leading deviceNetworkId prefix if present)
         def normalizedCamera = cameraName?.toString()?.replaceFirst(/^frigate_/, "")
-        
-        def headers = [:]
-        if (frigateUsername && frigatePassword) {
-            def auth = "${frigateUsername}:${frigatePassword}".bytes.encodeBase64().toString()
-            headers = ["Authorization": "Basic ${auth}"]
-        }
-        
         def url = "http://${frigateServer}:${frigatePort}/api/${normalizedCamera}/latest.jpg"
-        httpGet([uri: url, headers: headers, contentType: 'image/jpeg']) { response ->
-            if (response.status == 200) {
-                def bytes = null
-                try {
-                    bytes = response?.data?.bytes
-                } catch (ignored) {
-                    // Some platforms provide InputStream - fallback if needed
-                }
-                if (bytes) {
-                    def base64 = bytes.encodeBase64().toString()
-                    def dataUri = "data:image/jpeg;base64,${base64}"
-                    def childId = "frigate_${normalizedCamera}"
-                    def child = getChildDevice(childId)
-                    if (child) {
-                        child.updateSnapshot(dataUri, url)
-                        log.info "Frigate Parent App: Snapshot stored on device ${child.label}"
-                    } else {
-                        log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot"
-                    }
-                } else {
-                    log.error "Frigate Parent App: Snapshot data missing for ${normalizedCamera}"
-                }
-            } else {
-                log.error "Frigate Parent App: Failed to get snapshot for ${normalizedCamera}: ${response.status}"
-            }
+        def childId = "frigate_${normalizedCamera}"
+        def child = getChildDevice(childId)
+        if (child) {
+            // Store URL-only to avoid large base64 attributes
+            child.updateSnapshot(null, url)
+            log.info "Frigate Parent App: Snapshot URL stored on device ${child.label}"
+        } else {
+            log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot URL"
         }
     } catch (Exception e) {
-        log.error "Frigate Parent App: Error getting snapshot for ${cameraName}: ${e.message}"
+        log.error "Frigate Parent App: Error setting snapshot URL for ${cameraName}: ${e.message}"
     }
 }
 

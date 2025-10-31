@@ -233,16 +233,10 @@ def updateSnapshot(String imageDataUri, String imageUrl) {
     if (debugLogging) {
         log.debug "Frigate Camera Device: updateSnapshot() called for ${device.label} - url: ${imageUrl}"
     }
-    if (imageDataUri) {
-        sendEvent(name: "snapshotImage", value: imageDataUri)
-    }
+    // Use URL-only to avoid large base64 attributes impacting device page load
     if (imageUrl) {
         sendEvent(name: "snapshotUrl", value: imageUrl)
-    }
-    // Standard tile rendering
-    def imageForTile = imageUrl ?: imageDataUri
-    if (imageForTile) {
-        sendEvent(name: "image", value: imageForTile)
+        sendEvent(name: "image", value: imageUrl)
     }
     sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
 }
