@@ -9,7 +9,7 @@ Before installing the Hubitat Frigate integration, ensure you have:
 3. **MQTT Broker** - Accessible to both Hubitat and Frigate
 4. **MQTT App** - Existing MQTT app on Hubitat (MQTT Link, MQTT Bridge, etc.)
 
-## Step 1: Install the Apps
+## Step 1: Install the App and Drivers
 
 ### Install Frigate Parent App
 1. Open Hubitat Hub Manager
@@ -17,9 +17,14 @@ Before installing the Hubitat Frigate integration, ensure you have:
 3. Copy and paste the contents of `Frigate Parent App.groovy`
 4. Click **Save**
 
-### Install Frigate Motion Device
+### Install Frigate Camera Device
 1. Go to **Drivers** → **Add User Driver**
-2. Copy and paste the contents of `Frigate Motion Device.groovy`
+2. Copy and paste the contents of `Frigate Camera Device.groovy`
+3. Click **Save**
+
+### Install Frigate MQTT Bridge Device
+1. Go to **Drivers** → **Add User Driver**
+2. Copy and paste the contents of `Frigate MQTT Bridge Device.groovy`
 3. Click **Save**
 
 ## Step 2: Configure the Parent App
@@ -29,16 +34,18 @@ Before installing the Hubitat Frigate integration, ensure you have:
 3. Fill in the configuration:
 
 ### MQTT Connection
-- **MQTT App**: Select your existing MQTT app from the dropdown
-- **Topic Prefix**: Enter "frigate" (matches your Frigate configuration)
+- **Broker IP/Port**: Your Unraid MQTT broker (e.g., 192.168.2.110 / 1883)
+- **Username/Password**: e.g., `hubitat` / your password
+- **Topic Prefix**: Enter `frigate` (must match your Frigate configuration)
 
 ### Camera Discovery
 - **Enable Auto Discovery**: Check this box
 - **Stats Refresh Interval**: 60 seconds (default)
 
-### Frigate Server
+### Frigate Server (HTTP API)
 - **Frigate Server IP**: Enter your Frigate server IP (e.g., 192.168.2.110)
 - **Frigate Port**: Enter your Frigate port (default: 5000)
+- **Frigate Username/Password**: If your API requires auth
 
 ### Debug
 - **Enable Debug Logging**: Check if you want detailed logging
@@ -53,15 +60,20 @@ Before installing the Hubitat Frigate integration, ensure you have:
 3. You should see devices for each camera in your Frigate setup
 
 ### Test MQTT Connection
-1. Check the Hubitat logs for MQTT connection messages
-2. Look for "Frigate Parent App: MQTT subscriptions created"
-3. If you see errors, verify your MQTT app configuration
+1. Check the Hubitat logs (Parent App)
+2. Look for: "Creating MQTT bridge device", then "MQTT bridge device configured successfully"
+3. If you see errors, verify broker IP/port/user/pass and topic prefix
 
 ### Test Motion Detection
 1. Walk in front of a camera
 2. Check the device state for that camera
 3. The `motion` state should change to "active"
 4. The `personDetected` state should change to "yes"
+
+### Test Snapshot Rendering
+1. Open a camera device → run `take()` or `getSnapshot()`
+2. Confirm attributes update: `image`, `snapshotUrl`, `snapshotImage`
+3. Add a Dashboard Image tile → Source: Attribute → pick the device and `image`
 
 ## Step 4: Configure Automation
 
@@ -79,22 +91,23 @@ Before installing the Hubitat Frigate integration, ensure you have:
 ## Troubleshooting
 
 ### No Cameras Discovered
-- Verify MQTT connection is working
-- Check that Frigate is publishing to `frigate/stats`
+- Verify Parent App logs show discovery and list of cameras
+- Ensure Frigate API `/api/config` and `/api/stats` are reachable (auth if required)
 - Ensure topic prefix matches Frigate configuration
 - Enable debug logging to see MQTT messages
 
 ### No Motion Detection
-- Verify MQTT events are being received
-- Check that Frigate is publishing to `frigate/events`
+- Verify MQTT bridge device exists and is configured
+- Check Parent App logs for `handleEventMessage` entries
+- Ensure Frigate is publishing to `frigate/events`
 - Ensure motion detection is enabled in Frigate
 - Check confidence threshold settings
 
 ### Connection Issues
-- Verify Frigate server IP and port are correct
-- Check that Frigate HTTP API is accessible
-- Ensure MQTT app is properly configured
-- Test MQTT connection independently
+- Verify MQTT broker settings and credentials
+- Verify Frigate server IP/port and HTTP API access
+- Ensure MQTT bridge device shows configured
+- Test MQTT connection independently if needed
 
 ### Device States Not Updating
 - Check MQTT message parsing in logs
@@ -105,17 +118,18 @@ Before installing the Hubitat Frigate integration, ensure you have:
 ## Configuration Files
 
 ### Frigate Configuration
-Ensure your Frigate `config.yml` has MQTT enabled:
+Ensure your Frigate `config.yml` has MQTT enabled (replace placeholders with your values):
 ```yaml
 mqtt:
-  host: 192.168.2.110
+  host: <MQTT_BROKER_IP>
   port: 1883
   topic_prefix: frigate
   client_id: frigate
-  user: frigate
-  password: depeche6667
+  user: <MQTT_USERNAME>
+  password: <MQTT_PASSWORD>
   stats_interval: 60
 ```
+Note: Do not share your actual credentials publicly or commit them to source control.
 
 ### MQTT App Configuration
 Ensure your MQTT app is configured to connect to the same broker as Frigate.

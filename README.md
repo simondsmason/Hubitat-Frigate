@@ -1,11 +1,11 @@
 # Hubitat Frigate Integration
 
-A comprehensive Hubitat integration for Frigate NVR that provides automatic camera discovery, motion detection, and object recognition capabilities.
+A comprehensive Hubitat integration for Frigate NVR that provides automatic camera discovery, real-time motion/object detection via MQTT, and optional snapshots via the Frigate HTTP API.
 
 ## Features
 
-- **Automatic Camera Discovery** - Discovers cameras from Frigate stats via MQTT
-- **Real-time Motion Detection** - Motion and object detection via MQTT events
+- **Automatic Camera Discovery** - Discovers cameras from Frigate config/stats (HTTP API)
+- **Real-time Motion Detection** - Motion and object detection via MQTT events (through an MQTT bridge device)
 - **Object Recognition** - Person, car, dog, cat detection with confidence scores
 - **Existing MQTT Integration** - Works with your existing MQTT infrastructure
 - **HTTP API Access** - Snapshot and stats retrieval from Frigate
@@ -15,20 +15,21 @@ A comprehensive Hubitat integration for Frigate NVR that provides automatic came
 
 - Hubitat Elevation Hub
 - Frigate NVR running on your network
-- Existing MQTT app on Hubitat (MQTT Link, MQTT Bridge, etc.)
+- MQTT broker accessible to both Hubitat and Frigate
 - MQTT broker accessible to both Hubitat and Frigate
 
 ## Installation
 
-1. **Install the Apps**:
-   - Install "Frigate Parent App" in Hubitat
-   - Install "Frigate Motion Device" in Hubitat
+1. **Install the App and Drivers**:
+   - Apps → Add User App → paste `Frigate Parent App.groovy`
+   - Drivers → Add User Driver → paste `Frigate Camera Device.groovy`
+   - Drivers → Add User Driver → paste `Frigate MQTT Bridge Device.groovy`
 
 2. **Configure the Parent App**:
-   - Select your existing MQTT app
-   - Set Frigate server IP and port (default: 192.168.2.110:5000)
-   - Set topic prefix to "frigate"
-   - Enable auto discovery
+   - Enter MQTT broker IP, port, username, password, topic prefix (e.g., `frigate`)
+   - Enter Frigate server IP/port (e.g., 192.168.2.110:5000)
+   - Optionally enter Frigate credentials if your API requires auth
+   - Ensure Auto Discovery is enabled
 
 3. **Automatic Setup**:
    - App will automatically discover your cameras
@@ -39,14 +40,14 @@ A comprehensive Hubitat integration for Frigate NVR that provides automatic came
 
 ### Parent App Settings
 
-- **MQTT App**: Select your existing MQTT app
-- **Topic Prefix**: "frigate" (matches Frigate config)
-- **Frigate Server**: IP address of your Frigate server
-- **Frigate Port**: Port of your Frigate server (default: 5000)
-- **Auto Discovery**: Enable automatic camera discovery
-- **Refresh Interval**: Stats refresh interval in seconds
+- **MQTT Broker IP/Port/User/Pass**: Your Unraid MQTT details
+- **Topic Prefix**: `frigate` (must match Frigate config)
+- **Frigate Server IP/Port**: For HTTP API (config/stats/snapshots)
+- **Frigate Username/Password**: If API auth is required
+- **Auto Discovery**: Enabled
+- **Refresh Interval**: Every 60s (fixed schedule)
 
-### Motion Device Settings
+### Camera Device Settings
 
 - **Motion Timeout**: Seconds before motion resets to inactive
 - **Confidence Threshold**: Minimum confidence for object detection (0.0-1.0)
@@ -84,11 +85,14 @@ Each camera device provides:
 - `objectType` - Type of detected object
 - `lastDetection` - Timestamp of last detection
 - `lastUpdate` - Last device update
+- `snapshotUrl` - Direct URL to latest snapshot
+- `snapshotImage` - Base64 data URI of latest snapshot (for attribute tiles)
+- `image` - Value used by Dashboard Image tile (URL preferred)
 
 ## Commands
 
 - `refresh()` - Manual refresh of device state
-- `getSnapshot()` - Request latest snapshot from Frigate
+- `getSnapshot()` / `take()` - Fetch and store latest snapshot (updates `image`, `snapshotUrl`, `snapshotImage`)
 - `getStats()` - Get camera statistics from Frigate
 
 ## Automation Examples
@@ -114,19 +118,26 @@ Then activate security mode
 ## Troubleshooting
 
 ### No Cameras Discovered
-- Verify MQTT connection is working
-- Check that Frigate is publishing to `frigate/stats`
+- Verify parent log shows "Refreshing stats and config" and lists cameras
+- Ensure Frigate API `/api/config` is reachable from Hubitat (auth if required)
 - Ensure topic prefix matches Frigate configuration
 
 ### No Motion Detection
-- Verify MQTT events are being received
-- Check that Frigate is publishing to `frigate/events`
-- Enable debug logging to see MQTT messages
+- Verify MQTT bridge created and configured (logs in Parent App)
+- Check parent logs for `handleEventMessage` entries
+- Ensure Frigate is publishing to `frigate/events`
 
 ### Connection Issues
-- Verify Frigate server IP and port are correct
-- Check that Frigate HTTP API is accessible
-- Ensure MQTT app is properly configured
+- Verify MQTT settings (broker IP/port/user/pass) are correct
+- Verify Frigate server IP/port are correct, and API accessible
+- Check that the MQTT bridge device exists and was configured successfully
+
+## Change History (high level)
+
+- **1.05** - Parent app: MQTT bridge architecture; snapshot storage on devices; improved discovery logs
+- **1.04** - Switched to MQTT bridge device; HTTP API used for config/stats/snapshots only
+- **1.03** - Device: Image Capture support (take()), snapshot attributes, renders on dashboard image tile
+- **1.00-1.02** - Initial releases, event handling improvements
 
 ## Support
 
