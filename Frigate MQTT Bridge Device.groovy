@@ -8,11 +8,12 @@
  * Copyright 2025
  *
  * Change History:
+ * 1.01 - 2025-10-31 - Added device-level Debug preference; removed Parent App debug influence; logging now controlled solely by device setting
  * 1.00 - Initial release - MQTT bridge device for parent app communication
  *
  * @author Simon Mason
- * @version 1.00
- * @date 2025-01-15
+ * @version 1.01
+ * @date 2025-10-31
  */
 
 metadata {
@@ -35,7 +36,13 @@ metadata {
         command "connect"
         command "disconnect"
         command "refresh"
-        command "configure", [[name: "broker", type: "STRING"], [name: "port", type: "NUMBER"], [name: "username", type: "STRING"], [name: "password", type: "STRING"], [name: "topicPrefix", type: "STRING"], [name: "debugLogging", type: "ENUM"]]
+        command "configure", [[name: "broker", type: "STRING"], [name: "port", type: "NUMBER"], [name: "username", type: "STRING"], [name: "password", type: "STRING"], [name: "topicPrefix", type: "STRING"]]
+    }
+}
+
+preferences {
+    section("Debug") {
+        input "debugLogging", "bool", title: "Enable Debug Logging", required: true, defaultValue: false
     }
 }
 
@@ -51,7 +58,7 @@ def updated() {
     connect()
 }
 
-def configure(String broker, Number port, String username, String password, String topicPrefix, String debugLogging) {
+def configure(String broker, Number port, String username, String password, String topicPrefix) {
     log.info "Frigate MQTT Bridge: Configuration received from parent app"
     
     // Store configuration in device state
@@ -60,11 +67,12 @@ def configure(String broker, Number port, String username, String password, Stri
     state.mqttUsername = username
     state.mqttPassword = password
     state.topicPrefix = topicPrefix
-    state.debugLogging = (debugLogging == "true" || debugLogging == true)
     
     // Connect after configuration
     connect()
 }
+
+private Boolean isDebug() { return (settings?.debugLogging == true) }
 
 def connect() {
     // Get configuration from state (set by parent app via configure command)
@@ -73,7 +81,7 @@ def connect() {
     def username = state.mqttUsername
     def password = state.mqttPassword
     def topicPrefix = state.topicPrefix ?: "frigate"
-    def debugLogging = state.debugLogging ?: false
+    def debugLogging = isDebug()
     
     if (!broker) {
         log.error "Frigate MQTT Bridge: No broker configured. Waiting for parent app to configure."
@@ -140,7 +148,7 @@ def subscribeToTopics() {
     }
     
     def topicPrefix = state.topicPrefix ?: "frigate"
-    def debugLogging = state.debugLogging ?: false
+    def debugLogging = isDebug()
     
     try {
         // Subscribe to Frigate stats for camera discovery
@@ -164,7 +172,7 @@ def subscribeToTopics() {
 
 // Called automatically by Hubitat when MQTT messages are received
 def parse(String message) {
-    def debugLogging = state.debugLogging ?: false
+    def debugLogging = isDebug()
     
     if (debugLogging) {
         log.debug "Frigate MQTT Bridge: Received MQTT message"
@@ -209,7 +217,7 @@ def parse(String message) {
 
 // Called automatically by Hubitat for MQTT connection status updates
 def mqttClientStatus(String message) {
-    def debugLogging = state.debugLogging ?: false
+    def debugLogging = isDebug()
     
     log.info "Frigate MQTT Bridge: mqttClientStatus() called with: ${message}"
     

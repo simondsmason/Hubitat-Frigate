@@ -13,9 +13,10 @@
  * 1.03 - CRITICAL FIX: Fixed null pointer error when using interfaces.mqtt in parent apps (interfaces.mqtt is only available in device drivers). Added automatic fallback to HTTP polling when MQTT is not available. All MQTT operations now check for availability before use. HTTP polling restored with improved event handling and 5-second interval.
  * 1.04 - MAJOR ARCHITECTURE CHANGE: Created Frigate MQTT Bridge Device driver to handle MQTT connectivity (parent apps cannot use interfaces.mqtt). Parent app now creates and manages a bridge device that connects to MQTT and forwards messages. Removed all HTTP event polling code. HTTP API now only used for snapshots and camera config checks. Real-time MQTT events via bridge device.
  * 1.05 - 2025-10-31 - Added snapshot retrieval to store image on child devices (base64 data URI) and snapshot URL; minor logging improvements for device creation and discovery; versioned init log
+ * 1.06 - 2025-10-31 - Decoupled MQTT Bridge debug flag from Parent App; bridge debug controlled by device preference only
  * 
  * @author Simon Mason
- * @version 1.05
+ * @version 1.06
  * @date 2025-10-31
  */
 
@@ -80,7 +81,7 @@ def updated() {
 }
 
 def initialize() {
-    log.info "Frigate Parent App: Initializing v1.04"
+    log.info "Frigate Parent App: Initializing v1.06"
     
     // Initialize state for tracking processed events
     if (!state.processedEventIds) {
@@ -144,8 +145,7 @@ def configureMQTTBridge() {
             mqttPort ?: 1883,
             mqttUsername ?: "",
             mqttPassword ?: "",
-            topicPrefix ?: "frigate",
-            debugLogging ? "true" : "false"
+            topicPrefix ?: "frigate"
         )
         log.info "Frigate Parent App: MQTT bridge device configured successfully"
     } catch (Exception e) {
@@ -208,45 +208,25 @@ def handleEventMessage(String message) {
             log.debug "Frigate Parent App: Event details - Type: ${eventType}, Camera: ${cameraName}, ID: ${eventId}"
         }
         
-        // Only process "new" events (new detections), not "end" or "update" events
-        if (eventType == "end") {
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Skipping end event for ${cameraName} (event ID: ${eventId})"
-            }
-            return
-        }
+        // Process lifecycle:
+        // - new: set motion active, update detection
+        // - update: keep motion active, refresh detection if provided
+        // - end: set motion inactive
         
-        // For "update" events, we could process them if needed, but "new" events are what we want
-        if (eventType == "update") {
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Skipping update event for ${cameraName} (event ID: ${eventId})"
+        // Deduplicate only 'new' events so we still process updates and end
+        if (eventType == "new") {
+            if (eventId && state.processedEventIds?.contains(eventId)) {
+                if (debugLogging) {
+                    log.debug "Frigate Parent App: Already processed NEW event ${eventId} for camera ${cameraName}"
+                }
+                return
             }
-            return
-        }
-        
-        // Check if we've already processed this event
-        if (eventId && state.processedEventIds?.contains(eventId)) {
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Already processed event ${eventId} for camera ${cameraName}"
-                log.debug "Frigate Parent App: Processed event IDs count: ${state.processedEventIds?.size() ?: 0}"
-            }
-            return
-        }
-        
-        // Mark event as processed
-        if (eventId) {
-            state.processedEventIds = state.processedEventIds ?: []
-            state.processedEventIds.add(eventId)
-            // Keep only last 100 to prevent state bloat
-            if (state.processedEventIds.size() > 100) {
-                state.processedEventIds = state.processedEventIds[-100..-1]
-            }
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Marked event ${eventId} as processed. Total processed: ${state.processedEventIds.size()}"
-            }
-        } else {
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Event has no ID, cannot track processing"
+            if (eventId) {
+                state.processedEventIds = state.processedEventIds ?: []
+                state.processedEventIds.add(eventId)
+                if (state.processedEventIds.size() > 100) {
+                    state.processedEventIds = state.processedEventIds[-100..-1]
+                }
             }
         }
         
@@ -275,28 +255,37 @@ def handleEventMessage(String message) {
                     log.debug "Frigate Parent App: Detection - Label: ${label}, Score: ${score}, Event Type: ${eventType}"
                 }
                 
-                // Update motion state for new detections
-                if (eventType == "new" || !eventType) {
+                // Motion lifecycle
+                if (eventType == "end") {
                     if (debugLogging) {
-                        log.debug "Frigate Parent App: Calling updateMotionState('active') on device ${deviceId}"
+                        log.debug "Frigate Parent App: Calling updateMotionState('inactive') on device ${deviceId} (end event)"
+                    }
+                    childDevice.updateMotionState("inactive")
+                } else {
+                    // new or update
+                    if (debugLogging) {
+                        log.debug "Frigate Parent App: Calling updateMotionState('active') on device ${deviceId} (${eventType ?: 'implicit'})"
                     }
                     childDevice.updateMotionState("active")
                 }
                 
-                // Update specific object detection
-                if (label) {
+                // Update specific object detection on new/update
+                if (label && eventType != "end") {
                     if (debugLogging) {
                         log.debug "Frigate Parent App: Calling updateObjectDetection('${label}', ${score}) on device ${deviceId}"
                     }
                     childDevice.updateObjectDetection(label, score)
                     log.info "Frigate Parent App: Event processed - ${cameraName}: ${label} (${score}) - Event ID: ${eventId}"
                 } else {
-                    // If no label but motion detected, just update motion
+                    // If no label provided, we already updated motion above
                     if (debugLogging) {
-                        log.debug "Frigate Parent App: No label found, only updating motion state on ${deviceId}"
+                        log.debug "Frigate Parent App: No label update for device ${deviceId} (type: ${eventType})"
                     }
-                    childDevice.updateMotionState("active")
-                    log.info "Frigate Parent App: Motion detected on ${cameraName} - Event ID: ${eventId}"
+                    if (eventType == "new") {
+                        log.info "Frigate Parent App: Motion started on ${cameraName} - Event ID: ${eventId}"
+                    } else if (eventType == "end") {
+                        log.info "Frigate Parent App: Motion ended on ${cameraName} - Event ID: ${eventId}"
+                    }
                 }
                 
                 if (debugLogging) {

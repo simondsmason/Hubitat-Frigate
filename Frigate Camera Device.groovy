@@ -59,7 +59,6 @@ metadata {
     
     preferences {
         section("Camera Settings") {
-            input "motionTimeout", "number", title: "Motion Timeout (seconds)", required: true, defaultValue: 30
             input "confidenceThreshold", "number", title: "Confidence Threshold (0.0-1.0)", required: true, defaultValue: 0.5
         }
         
@@ -94,8 +93,6 @@ def initialize() {
     sendEvent(name: "cameraName", value: device.label.replace("Frigate ", "").replace(" ", "_").toLowerCase())
     sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
     
-    // Schedule motion timeout
-    runIn(motionTimeout ?: 30, "motionTimeoutHandler")
 }
 
 def refresh() {
@@ -126,24 +123,6 @@ def updateMotionState(String state) {
         
         if (state == "active") {
             log.info "Frigate Camera Device: Motion detected on ${device.label}"
-            
-            if (debugLogging) {
-                log.debug "Frigate Camera Device: Scheduling motion timeout in ${motionTimeout ?: 30} seconds"
-            }
-            
-            // Track detection time
-            state.lastDetectionTime = now()
-            
-            // Cancel any existing timeout and schedule a new one
-            unschedule("motionTimeoutHandler")
-            runIn(motionTimeout ?: 30, "motionTimeoutHandler")
-        } else if (state == "inactive") {
-            // Cancel timeout if motion is set to inactive manually
-            unschedule("motionTimeoutHandler")
-            
-            if (debugLogging) {
-                log.debug "Frigate Camera Device: Motion set to inactive, canceled timeout"
-            }
         }
         
         if (debugLogging) {
@@ -162,7 +141,7 @@ def updateObjectDetection(String objectType, Number confidence) {
         log.debug "Frigate Camera Device: updateObjectDetection() called - Object: ${objectType}, Confidence: ${confidence} on device: ${device.label}"
     }
     
-    // Track when we last got a detection - used for timeout logic
+    // Track when we last got a detection
     state.lastDetectionTime = now()
     
     // Update confidence
@@ -217,10 +196,6 @@ def updateObjectDetection(String objectType, Number confidence) {
             log.debug "Frigate Camera Device: Confidence ${confidence} >= threshold ${threshold}, updating motion to active"
         }
         updateMotionState("active")
-    } else {
-        if (debugLogging) {
-            log.debug "Frigate Camera Device: Confidence ${confidence} < threshold ${threshold}, not updating motion state"
-        }
     }
     
     if (debugLogging) {
@@ -228,59 +203,7 @@ def updateObjectDetection(String objectType, Number confidence) {
     }
 }
 
-def motionTimeoutHandler() {
-    log.info "Frigate Camera Device: Motion timeout handler called for ${device.label}"
-    
-    if (debugLogging) {
-        log.debug "Frigate Camera Device: Checking if timeout should fire - last detection: ${state.lastDetectionTime ? new Date(state.lastDetectionTime).format('HH:mm:ss') : 'never'}"
-    }
-    
-    // Check if we've received a detection since this timeout was scheduled
-    def timeSinceLastDetection = state.lastDetectionTime ? (now() - state.lastDetectionTime) / 1000 : 9999
-    def timeoutSeconds = motionTimeout ?: 30
-    
-    if (debugLogging) {
-        log.debug "Frigate Camera Device: Time since last detection: ${timeSinceLastDetection}s, timeout: ${timeoutSeconds}s"
-    }
-    
-    // Only reset if no detection in the timeout period
-    if (timeSinceLastDetection >= timeoutSeconds) {
-        log.info "Frigate Camera Device: Motion timeout reached (${timeSinceLastDetection}s since last detection) - resetting states for ${device.label}"
-        
-        // Only reset if motion is still active
-        def currentMotion = device.currentValue("motion")
-        if (currentMotion == "active") {
-            sendEvent(name: "motion", value: "inactive")
-            
-            // Reset all object detection states when motion times out
-            sendEvent(name: "personDetected", value: "no")
-            sendEvent(name: "carDetected", value: "no")
-            sendEvent(name: "dogDetected", value: "no")
-            sendEvent(name: "catDetected", value: "no")
-            sendEvent(name: "objectType", value: "none")
-            sendEvent(name: "confidence", value: 0.0)
-            
-            sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
-            
-            log.info "Frigate Camera Device: Reset motion and object detection states for ${device.label}"
-            
-            if (debugLogging) {
-                log.debug "Frigate Camera Device: Reset all object detection states to 'no'"
-            }
-        } else {
-            if (debugLogging) {
-                log.debug "Frigate Camera Device: Motion already inactive (${currentMotion}), skipping reset"
-            }
-        }
-    } else {
-        // Detection came in during timeout - reschedule
-        def remainingTime = timeoutSeconds - timeSinceLastDetection
-        if (debugLogging) {
-            log.debug "Frigate Camera Device: Recent detection found (${timeSinceLastDetection}s ago), rescheduling timeout in ${remainingTime}s"
-        }
-        runIn((int)remainingTime, "motionTimeoutHandler")
-    }
-}
+// No motion timeout logic; motion goes inactive on 'end' events from Frigate
 
 def getSnapshot() {
     log.info "Frigate Camera Device: Requesting snapshot for ${device.label}"
