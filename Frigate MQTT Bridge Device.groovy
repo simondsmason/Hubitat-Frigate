@@ -8,12 +8,13 @@
  * Copyright 2025
  *
  * Change History:
- * 1.01 - 2025-10-31 - Added device-level Debug preference; removed Parent App debug influence; logging now controlled solely by device setting
  * 1.00 - Initial release - MQTT bridge device for parent app communication
+ * 1.01 - 2025-10-31 - Added device-level Debug preference; removed Parent App debug influence; logging now controlled solely by device setting
+ * 1.02 - 2025-11-07 - Added Initialize capability and automatic reconnection on hub start; connection health check
  *
  * @author Simon Mason
- * @version 1.01
- * @date 2025-10-31
+ * @version 1.02
+ * @date 2025-11-07
  */
 
 metadata {
@@ -29,6 +30,7 @@ metadata {
         importUrl: ""
     ) {
         capability "Refresh"
+        capability "Initialize"
         
         attribute "connectionStatus", "string"
         attribute "lastMessage", "string"
@@ -49,13 +51,26 @@ preferences {
 def installed() {
     log.info "Frigate MQTT Bridge: Device installed"
     sendEvent(name: "connectionStatus", value: "disconnected")
-    // Wait for parent app to configure us
+    // Wait briefly for parent to send configuration, then initialise
+    runIn(2, "initialize")
 }
 
 def updated() {
     log.info "Frigate MQTT Bridge: Device updated"
+    unschedule()
     disconnect()
-    connect()
+    initialize()
+}
+
+def initialize() {
+    log.info "Frigate MQTT Bridge: Initializing"
+    unschedule()
+    runEvery5Minutes("ensureConnected")
+    if (state.mqttBroker) {
+        connect()
+    } else {
+        log.info "Frigate MQTT Bridge: Awaiting configuration from parent before connecting"
+    }
 }
 
 def configure(String broker, Number port, String username, String password, String topicPrefix) {
@@ -69,12 +84,19 @@ def configure(String broker, Number port, String username, String password, Stri
     state.topicPrefix = topicPrefix
     
     // Connect after configuration
-    connect()
+    runIn(1, "connect")
 }
 
 private Boolean isDebug() { return (settings?.debugLogging == true) }
 
 def connect() {
+    if (state.connecting == true) {
+        if (isDebug()) {
+            log.debug "Frigate MQTT Bridge: Connection attempt already in progress"
+        }
+        return
+    }
+
     // Get configuration from state (set by parent app via configure command)
     def broker = state.mqttBroker
     def port = state.mqttPort ?: 1883
@@ -91,6 +113,7 @@ def connect() {
     
     log.info "Frigate MQTT Bridge: Connecting to MQTT broker ${broker}:${port}"
     sendEvent(name: "connectionStatus", value: "connecting")
+    state.connecting = true
     
     try {
         // Disconnect if already connected
@@ -125,6 +148,8 @@ def connect() {
     } catch (Exception e) {
         log.error "Frigate MQTT Bridge: Failed to connect: ${e.message}"
         sendEvent(name: "connectionStatus", value: "error")
+        state.connecting = false
+        state.lastError = e.message
     }
 }
 
@@ -135,14 +160,29 @@ def disconnect() {
             interfaces.mqtt.disconnect()
         }
         sendEvent(name: "connectionStatus", value: "disconnected")
+        state.connecting = false
     } catch (Exception e) {
         log.error "Frigate MQTT Bridge: Error disconnecting: ${e.message}"
+        state.lastError = e.message
+    }
+}
+
+def ensureConnected() {
+    def broker = state.mqttBroker
+    if (!broker) {
+        return
+    }
+
+    if (!interfaces.mqtt.isConnected() && state.connecting != true) {
+        log.warn "Frigate MQTT Bridge: MQTT connection lost, attempting to reconnect"
+        connect()
     }
 }
 
 def subscribeToTopics() {
     if (!interfaces.mqtt.isConnected()) {
         log.error "Frigate MQTT Bridge: Not connected, attempting reconnect"
+        state.connecting = false
         runIn(5, "connect")
         return
     }
@@ -163,6 +203,8 @@ def subscribeToTopics() {
         
         sendEvent(name: "connectionStatus", value: "connected")
         log.info "Frigate MQTT Bridge: MQTT connection established and subscriptions active"
+        state.connecting = false
+        state.lastError = null
         
     } catch (Exception e) {
         log.error "Frigate MQTT Bridge: Failed to subscribe: ${e.message}"
@@ -201,6 +243,21 @@ def parse(String message) {
             if (debugLogging) {
                 log.debug "Frigate MQTT Bridge: Forwarding event message to parent app"
             }
+            // Emit concise summary of event type/camera/id for visibility
+            try {
+                def evt = new groovy.json.JsonSlurper().parseText(payload)
+                def evtType = evt?.type
+                def evtData = (evtType == "end") ? (evt?.before ?: [:]) : (evt?.after ?: evt)
+                def cam = evtData?.camera
+                def evtId = evtData?.id
+                if (debugLogging) {
+                    log.debug "Frigate MQTT Bridge: Event summary - type=${evtType ?: 'unknown'}, camera=${cam ?: 'unknown'}, id=${evtId ?: 'unknown'} (${payload?.size() ?: 0} bytes)"
+                }
+            } catch (Exception ex) {
+                if (debugLogging) {
+                    log.debug "Frigate MQTT Bridge: Event summary parse error: ${ex.message}"
+                }
+            }
             // Call parent app method to handle events
             parent?.handleEventMessage(payload)
         } else {
@@ -224,6 +281,8 @@ def mqttClientStatus(String message) {
     if (message.startsWith("Error:") || message.contains("failed") || message.contains("disconnected")) {
         log.error "Frigate MQTT Bridge: MQTT Error: ${message}"
         sendEvent(name: "connectionStatus", value: "error")
+        state.connecting = false
+        state.lastError = message
         
         // Attempt to reconnect after a delay
         log.info "Frigate MQTT Bridge: Attempting reconnect in 10 seconds"
@@ -232,6 +291,8 @@ def mqttClientStatus(String message) {
     } else if (message.contains("connected") || message.contains("Connected")) {
         log.info "Frigate MQTT Bridge: MQTT connection established via status callback"
         sendEvent(name: "connectionStatus", value: "connected")
+        state.connecting = false
+        state.lastError = null
         // Subscribe to topics after connection
         runIn(1, "subscribeToTopics")
     } else {

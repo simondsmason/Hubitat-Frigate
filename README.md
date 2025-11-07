@@ -134,11 +134,12 @@ Then activate security mode
 
 ## Change History (high level)
 
-- **1.06** - MQTT Bridge driver: Debug decoupled from Parent App; independent debug toggles
-- **1.05** - Parent app: snapshot storage on devices; improved discovery logs
-- **1.04** - Switched to MQTT bridge device; HTTP API used for config/stats/snapshots only
+- **1.00–1.02** - Initial releases, event handling improvements
 - **1.03** - Device: Image Capture support (take()), snapshot attributes, renders on dashboard image tile
-- **1.00-1.02** - Initial releases, event handling improvements
+- **1.04** - Switched to MQTT bridge device; HTTP API used for config/stats/snapshots only
+- **1.05** - Parent app: snapshot storage on devices; improved discovery logs
+- **1.06** - MQTT Bridge driver: Debug decoupled from Parent App; independent debug toggles
+- **1.07** - Added automatic MQTT bridge reconnection, improved event normalization, and safe confidence parsing
 
 ## Support
 

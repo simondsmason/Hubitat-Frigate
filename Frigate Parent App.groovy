@@ -14,10 +14,11 @@
  * 1.04 - MAJOR ARCHITECTURE CHANGE: Created Frigate MQTT Bridge Device driver to handle MQTT connectivity (parent apps cannot use interfaces.mqtt). Parent app now creates and manages a bridge device that connects to MQTT and forwards messages. Removed all HTTP event polling code. HTTP API now only used for snapshots and camera config checks. Real-time MQTT events via bridge device.
  * 1.05 - 2025-10-31 - Added snapshot retrieval to store image on child devices (base64 data URI) and snapshot URL; minor logging improvements for device creation and discovery; versioned init log
  * 1.06 - 2025-10-31 - Decoupled MQTT Bridge debug flag from Parent App; bridge debug controlled by device preference only
+ * 1.07 - 2025-11-07 - Ensured bridge connectivity on init; normalized event labels and safe confidence parsing
  * 
  * @author Simon Mason
- * @version 1.06
- * @date 2025-10-31
+ * @version 1.07
+ * @date 2025-11-07
  */
 
 definition(
@@ -94,6 +95,7 @@ def initialize() {
     
     // Create or update MQTT bridge device
     createOrUpdateMQTTBridge()
+    runIn(3, "ensureBridgeConnected")
     
     if (settings.autoDiscover) {
         // Schedule periodic stats refresh (every 60 seconds) for camera discovery
@@ -150,6 +152,23 @@ def configureMQTTBridge() {
         log.info "Frigate Parent App: MQTT bridge device configured successfully"
     } catch (Exception e) {
         log.error "Frigate Parent App: Failed to configure bridge device: ${e.message}"
+    }
+}
+
+def ensureBridgeConnected() {
+    def bridgeDevice = getChildDevice("frigate_mqtt_bridge")
+    if (!bridgeDevice) {
+        log.warn "Frigate Parent App: MQTT bridge device not found when attempting to ensure connection"
+        return
+    }
+    try {
+        if (bridgeDevice.hasCommand("ensureConnected")) {
+            bridgeDevice.ensureConnected()
+        } else {
+            bridgeDevice.connect()
+        }
+    } catch (Exception e) {
+        log.error "Frigate Parent App: Error ensuring bridge connectivity: ${e.message}"
     }
 }
 
@@ -229,6 +248,17 @@ def handleEventMessage(String message) {
                     state.processedEventIds = state.processedEventIds[-100..-1]
                 }
             }
+            // On motion start, publish an event snapshot URL to the device for persistent viewing
+            try {
+                def eventSnapshotUrl = "http://${frigateServer}:${frigatePort}/api/events/${eventId}/snapshot.jpg?bbox=1&timestamp=1"
+                def childForSnapshot = getChildDevice("frigate_${cameraName}")
+                if (childForSnapshot) {
+                    childForSnapshot.updateLastMotionSnapshotUrl(eventSnapshotUrl)
+                    if (debugLogging) {
+                        log.debug "Frigate Parent App: Set last motion snapshot URL for ${cameraName}: ${eventSnapshotUrl}"
+                    }
+                }
+            } catch (Exception ignored) {}
         }
         
         // Use eventData instead of event for the rest of the processing
@@ -251,6 +281,16 @@ def handleEventMessage(String message) {
                 // Frigate MQTT events have label directly, and score in data object
                 def label = event.label ?: event.sub_label
                 def score = event.data?.score ?: event.data?.top_score ?: event.top_score ?: 0.0
+
+                if (label == "animal" && event.sub_label) {
+                    label = event.sub_label
+                }
+
+                try {
+                    score = new BigDecimal(score.toString())
+                } catch (Exception ignored) {
+                    score = 0.0
+                }
                 
                 if (debugLogging) {
                     log.debug "Frigate Parent App: Detection - Label: ${label}, Score: ${score}, Event Type: ${eventType}"
@@ -446,8 +486,8 @@ def getCameraSnapshot(String cameraName) {
         def child = getChildDevice(childId)
         if (child) {
             // Store URL-only to avoid large base64 attributes
-            child.updateSnapshot(null, url)
-            log.info "Frigate Parent App: Snapshot URL stored on device ${child.label}"
+            child.updateLatestSnapshotUrl(url)
+            log.info "Frigate Parent App: Latest snapshot URL stored on device ${child.label}"
         } else {
             log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot URL"
         }

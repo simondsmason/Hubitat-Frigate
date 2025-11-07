@@ -12,10 +12,11 @@
  * 1.02 - 2025-10-31 - Added snapshotImage/snapshotUrl attributes, updateSnapshot command; device now renders snapshot on dashboard tiles via image attribute
  * 1.03 - 2025-10-31 - Replaced non-existent capability 'Image' with standard 'Image Capture'; added take() to fetch snapshot
  * 1.04 - 2025-10-31 - Renamed driver to "Frigate Camera Device" to reflect broader scope
+ * 1.05 - 2025-11-07 - Added safe confidence casting, motion threshold normalization, and improved detection logging
  * 
  * @author Simon Mason
- * @version 1.04
- * @date 2025-10-31
+ * @version 1.05
+ * @date 2025-11-07
  */
 
 metadata {
@@ -32,7 +33,7 @@ metadata {
     ) {
         capability "MotionSensor"
         capability "Refresh"
-        capability "Image Capture"
+        // Removed Image Capture to avoid showing a Take button that always returns latest.jpg
         
         // Custom attributes for Frigate-specific data
         attribute "personDetected", "string"
@@ -44,17 +45,16 @@ metadata {
         attribute "objectType", "string"
         attribute "cameraName", "string"
         attribute "lastUpdate", "string"
-        attribute "snapshotImage", "string"
-        attribute "snapshotUrl", "string"
+        attribute "latestSnapshotUrl", "string"
+        attribute "lastMotionSnapshotUrl", "string"
         
         // Commands
         command "refresh"
         command "updateMotionState", ["string"]
         command "updateObjectDetection", ["string", "number"]
-        command "getSnapshot"
         command "getStats"
-        command "updateSnapshot", ["string", "string"]
-        command "take"
+        command "updateLatestSnapshotUrl", ["string"]
+        command "updateLastMotionSnapshotUrl", ["string"]
     }
     
     preferences {
@@ -144,8 +144,17 @@ def updateObjectDetection(String objectType, Number confidence) {
     // Track when we last got a detection
     state.lastDetectionTime = now()
     
+    BigDecimal numericConfidence = 0.0G
+    try {
+        if (confidence != null) {
+            numericConfidence = new BigDecimal(confidence.toString())
+        }
+    } catch (Exception ignored) {
+        numericConfidence = 0.0G
+    }
+
     // Update confidence
-    sendEvent(name: "confidence", value: confidence)
+    sendEvent(name: "confidence", value: numericConfidence)
     sendEvent(name: "objectType", value: objectType)
     sendEvent(name: "lastDetection", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
     sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
@@ -174,7 +183,7 @@ def updateObjectDetection(String objectType, Number confidence) {
     // Set the detected object to "yes"
     if (objectStates.containsKey(objectType)) {
         sendEvent(name: objectStates[objectType], value: "yes")
-        log.info "Frigate Camera Device: ${objectType} detected on ${device.label} with confidence ${confidence}"
+        log.info "Frigate Camera Device: ${objectType} detected on ${device.label} with confidence ${numericConfidence}"
         
         if (debugLogging) {
             log.debug "Frigate Camera Device: Set ${objectType} detection state to 'yes'"
@@ -188,12 +197,19 @@ def updateObjectDetection(String objectType, Number confidence) {
     // Update motion state if confidence is above threshold
     def threshold = confidenceThreshold ?: 0.5
     if (debugLogging) {
-        log.debug "Frigate Camera Device: Checking confidence ${confidence} against threshold ${threshold}"
+        log.debug "Frigate Camera Device: Checking confidence ${numericConfidence} against threshold ${threshold}"
     }
     
-    if (confidence >= threshold) {
+    def thresholdValue = 0.0G
+    try {
+        thresholdValue = new BigDecimal(threshold.toString())
+    } catch (Exception ignored) {
+        thresholdValue = 0.5G
+    }
+
+    if (numericConfidence >= thresholdValue) {
         if (debugLogging) {
-            log.debug "Frigate Camera Device: Confidence ${confidence} >= threshold ${threshold}, updating motion to active"
+            log.debug "Frigate Camera Device: Confidence ${numericConfidence} >= threshold ${thresholdValue}, updating motion to active"
         }
         updateMotionState("active")
     }
@@ -205,22 +221,9 @@ def updateObjectDetection(String objectType, Number confidence) {
 
 // No motion timeout logic; motion goes inactive on 'end' events from Frigate
 
-def getSnapshot() {
-    log.info "Frigate Camera Device: Requesting snapshot for ${device.label}"
-    parent?.getCameraSnapshot(getCameraName())
-}
-
 def getStats() {
     log.info "Frigate Camera Device: Requesting stats for ${device.label}"
     parent?.getCameraStats(device.deviceNetworkId)
-}
-
-// Standard Image Capture capability command
-def take() {
-    if (debugLogging) {
-        log.debug "Frigate Camera Device: take() called - requesting snapshot"
-    }
-    getSnapshot()
 }
 
 // Helper method to get camera name from device
@@ -228,14 +231,25 @@ def getCameraName() {
     return device.currentValue("cameraName") ?: device.label.replace("Frigate ", "").replace(" ", "_").toLowerCase()
 }
 
-// Parent calls this to update the snapshot image and URL on the device
-def updateSnapshot(String imageDataUri, String imageUrl) {
+// Parent calls this to update the latest snapshot URL (latest.jpg)
+def updateLatestSnapshotUrl(String imageUrl) {
     if (debugLogging) {
-        log.debug "Frigate Camera Device: updateSnapshot() called for ${device.label} - url: ${imageUrl}"
+        log.debug "Frigate Camera Device: updateLatestSnapshotUrl() called for ${device.label} - url: ${imageUrl}"
     }
-    // Use URL-only to avoid large base64 attributes impacting device page load
     if (imageUrl) {
-        sendEvent(name: "snapshotUrl", value: imageUrl)
+        sendEvent(name: "latestSnapshotUrl", value: imageUrl)
+    }
+    sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
+}
+
+// Parent calls this on motion start to store the event snapshot URL and reflect it in the image tile
+def updateLastMotionSnapshotUrl(String imageUrl) {
+    if (debugLogging) {
+        log.debug "Frigate Camera Device: updateLastMotionSnapshotUrl() called for ${device.label} - url: ${imageUrl}"
+    }
+    if (imageUrl) {
+        sendEvent(name: "lastMotionSnapshotUrl", value: imageUrl)
+        // Copy to generic image attribute so dashboards show the event-time snapshot
         sendEvent(name: "image", value: imageUrl)
     }
     sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
