@@ -1,8 +1,8 @@
 /**
  * Frigate Parent App
  * 
- * Integrates with Frigate NVR via MQTT to provide motion detection and camera management
- * Automatically discovers cameras from Frigate stats
+ * Integrates with Frigate NVR via MQTT to provide motion detection, camera/zone devices,
+ * and snapshot/metadata management.
  * 
  * Copyright 2025
  *
@@ -15,11 +15,278 @@
  * 1.05 - 2025-10-31 - Added snapshot retrieval to store image on child devices (base64 data URI) and snapshot URL; minor logging improvements for device creation and discovery; versioned init log
  * 1.06 - 2025-10-31 - Decoupled MQTT Bridge debug flag from Parent App; bridge debug controlled by device preference only
  * 1.07 - 2025-11-07 - Ensured bridge connectivity on init; normalized event labels and safe confidence parsing
+ * 1.08 - 2025-11-08 - Added zone child devices, alert/motion metadata, and richer event tracking
+ * 1.09 - 2025-11-08 - Guarded event/zone state maps during MQTT processing to prevent null pointer exceptions
  * 
  * @author Simon Mason
- * @version 1.07
- * @date 2025-11-07
+ * @version 1.09
+ * @date 2025-11-08
  */
+
+private boolean zonesEnabled() {
+    return (settings?.enableZoneDevices != false)
+}
+
+private List<String> normalizeZoneList(def raw) {
+    if (!raw) {
+        return []
+    }
+    if (raw instanceof Collection) {
+        return raw.collect { it?.toString() }?.findAll { it }
+    }
+    def value = raw.toString()
+    return value ? [value] : []
+}
+
+private String normalizeUrl(def urlValue) {
+    if (!urlValue) {
+        return null
+    }
+    def url = urlValue.toString()
+    if (!url) {
+        return null
+    }
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+        return url
+    }
+    if (!url.startsWith("/")) {
+        url = "/${url}"
+    }
+    return "http://${frigateServer}:${frigatePort}${url}"
+}
+
+private String buildEventSnapshotUrl(String eventId) {
+    return eventId ? "http://${frigateServer}:${frigatePort}/api/events/${eventId}/snapshot.jpg?bbox=1&timestamp=1" : null
+}
+
+private String buildSnapshotUrl(String eventId, def snapshotField) {
+    def direct = normalizeUrl(snapshotField)
+    if (direct) {
+        return direct
+    }
+    return buildEventSnapshotUrl(eventId)
+}
+
+private String buildEventClipUrl(String eventId) {
+    return eventId ? "http://${frigateServer}:${frigatePort}/api/events/${eventId}/clip.mp4" : null
+}
+
+private String buildClipUrl(String eventId, def clipField) {
+    def candidate = clipField
+    if (candidate instanceof Collection) {
+        candidate = candidate ? candidate.first() : null
+    }
+    def direct = normalizeUrl(candidate)
+    if (direct) {
+        return direct
+    }
+    return buildEventClipUrl(eventId)
+}
+
+private String formatTimestamp(def ts) {
+    if (!ts) {
+        return ""
+    }
+    try {
+        double seconds = ts instanceof Number ? ts.toDouble() : ts.toString().toDouble()
+        long millis = (long)(seconds * 1000)
+        def date = new Date(millis)
+        def tz = location?.timeZone ?: TimeZone.getDefault()
+        return date.format("yyyy-MM-dd HH:mm:ss", tz)
+    } catch (Exception ignored) {
+        return ""
+    }
+}
+
+private void ensureStateMaps() {
+    state.processedEventIds = state.processedEventIds ?: []
+    state.eventZoneMap = state.eventZoneMap ?: [:]
+    state.activeCameraEvents = state.activeCameraEvents ?: [:]
+    state.activeZoneEvents = state.activeZoneEvents ?: [:]
+    state.zoneChildMap = state.zoneChildMap ?: [:]
+}
+
+private void addActiveCameraEvent(String cameraName, String eventId) {
+    ensureStateMaps()
+    if (!cameraName || !eventId) {
+        return
+    }
+    def list = (state.activeCameraEvents[cameraName] ?: []) as List
+    if (!list.contains(eventId)) {
+        list << eventId
+    }
+    state.activeCameraEvents[cameraName] = list
+}
+
+private void removeActiveCameraEvent(String cameraName, String eventId) {
+    ensureStateMaps()
+    if (!cameraName || !eventId) {
+        return
+    }
+    def list = (state.activeCameraEvents[cameraName] ?: []) as List
+    list.remove(eventId)
+    if (list.isEmpty()) {
+        state.activeCameraEvents.remove(cameraName)
+    } else {
+        state.activeCameraEvents[cameraName] = list
+    }
+}
+
+private boolean cameraHasActiveEvents(String cameraName) {
+    ensureStateMaps()
+    def list = state.activeCameraEvents[cameraName] ?: []
+    return list && !list.isEmpty()
+}
+
+private String sanitizeForId(String value) {
+    return value?.toString()?.toLowerCase()?.replaceAll("[^a-z0-9]+", "_") ?: ""
+}
+
+private String prettifyZoneName(String zoneName) {
+    if (!zoneName) {
+        return ""
+    }
+    return zoneName.split(/[_\s-]+/).collect { it.capitalize() }.join(" ")
+}
+
+private String buildZoneDeviceId(String cameraName, String zoneName) {
+    return "frigate_${sanitizeForId(cameraName)}_zone_${sanitizeForId(zoneName)}"
+}
+
+private String zoneKey(String cameraName, String zoneName) {
+    return "${cameraName}__${zoneName}"
+}
+
+private void addActiveZoneEvent(String cameraName, String zoneName, String eventId) {
+    ensureStateMaps()
+    if (!cameraName || !zoneName || !eventId) {
+        return
+    }
+    def key = zoneKey(cameraName, zoneName)
+    def list = (state.activeZoneEvents[key] ?: []) as List
+    if (!list.contains(eventId)) {
+        list << eventId
+    }
+    state.activeZoneEvents[key] = list
+}
+
+private void removeActiveZoneEvent(String cameraName, String zoneName, String eventId) {
+    ensureStateMaps()
+    if (!cameraName || !zoneName || !eventId) {
+        return
+    }
+    def key = zoneKey(cameraName, zoneName)
+    def list = (state.activeZoneEvents[key] ?: []) as List
+    list.remove(eventId)
+    if (list.isEmpty()) {
+        state.activeZoneEvents.remove(key)
+    } else {
+        state.activeZoneEvents[key] = list
+    }
+}
+
+private boolean zoneHasActiveEvents(String cameraName, String zoneName) {
+    ensureStateMaps()
+    def key = zoneKey(cameraName, zoneName)
+    def list = state.activeZoneEvents[key] ?: []
+    return list && !list.isEmpty()
+}
+
+private def getZoneDevice(String cameraName, String zoneName) {
+    ensureStateMaps()
+    def zoneDeviceId = buildZoneDeviceId(cameraName, zoneName)
+    return getChildDevice(zoneDeviceId)
+}
+
+private def getOrCreateZoneDevice(String cameraName, String zoneName) {
+    ensureStateMaps()
+    def zoneDeviceId = buildZoneDeviceId(cameraName, zoneName)
+    def existing = getChildDevice(zoneDeviceId)
+    if (existing) {
+        return existing
+    }
+    
+    def cameraTitle = cameraName.replace('_', ' ').toUpperCase()
+    def zoneTitle = prettifyZoneName(zoneName)
+    def label = "Frigate ${cameraTitle} - ${zoneTitle}"
+    try {
+        def device = addChildDevice("simonmason", "Frigate Camera Device", zoneDeviceId, [
+            name       : label,
+            label      : label,
+            isComponent: false
+        ])
+        if (device) {
+            device.updateDataValue("deviceRole", "zone")
+            device.updateDataValue("cameraName", cameraName)
+            device.updateDataValue("zoneName", zoneName)
+            device.updateEventMetadata([cameraName: cameraName, zoneName: zoneName])
+            state.zoneChildMap[zoneKey(cameraName, zoneName)] = zoneDeviceId
+            log.info "Frigate Parent App: Created zone device ${label}"
+        }
+        return device
+    } catch (Exception e) {
+        log.error "Frigate Parent App: Failed to create zone device for ${cameraName}/${zoneName}: ${e.message}"
+        return null
+    }
+}
+
+private void handleZoneEvents(String cameraName,
+                              String eventId,
+                              String eventType,
+                              Map baseMetadata,
+                              List<String> currentZones,
+                              List<String> enteredZones,
+                              String label,
+                              BigDecimal score) {
+    ensureStateMaps()
+    def previousZones = state.eventZoneMap[eventId] ?: []
+    def normalizedCurrent = currentZones ?: []
+    def normalizedEntered = enteredZones ?: []
+    
+    if (eventType == "end") {
+        previousZones.each { zoneName ->
+            removeActiveZoneEvent(cameraName, zoneName, eventId)
+            def zoneDevice = getZoneDevice(cameraName, zoneName)
+            if (zoneDevice) {
+                zoneDevice.updateEventMetadata(baseMetadata)
+                if (!zoneHasActiveEvents(cameraName, zoneName)) {
+                    zoneDevice.clearDetections()
+                }
+            }
+        }
+        state.eventZoneMap.remove(eventId)
+        return
+    }
+    
+    def removedZones = previousZones.findAll { !normalizedCurrent.contains(it) }
+    removedZones.each { zoneName ->
+        removeActiveZoneEvent(cameraName, zoneName, eventId)
+        if (!zoneHasActiveEvents(cameraName, zoneName)) {
+            def zoneDevice = getZoneDevice(cameraName, zoneName)
+            zoneDevice?.clearDetections()
+        }
+    }
+    state.eventZoneMap[eventId] = normalizedCurrent
+    
+    normalizedCurrent.each { zoneName ->
+        def zoneDevice = getOrCreateZoneDevice(cameraName, zoneName)
+        if (!zoneDevice) {
+            return
+        }
+        addActiveZoneEvent(cameraName, zoneName, eventId)
+        
+        def zoneMetadata = [:] << baseMetadata
+        zoneMetadata.zoneName = zoneName
+        zoneMetadata.currentZones = [zoneName]
+        zoneMetadata.enteredZones = normalizedEntered.contains(zoneName) ? [zoneName] : []
+        
+        zoneDevice.updateEventMetadata(zoneMetadata)
+        if (label && eventType != "end") {
+            zoneDevice.updateObjectDetection(label, score)
+        }
+        zoneDevice.updateMotionState("active")
+    }
+}
 
 definition(
     name: "Frigate Parent App",
@@ -47,6 +314,10 @@ preferences {
             paragraph "Cameras will be automatically discovered from Frigate stats"
             input "autoDiscover", "bool", title: "Enable Auto Discovery", required: true, defaultValue: true
             input "refreshInterval", "number", title: "Stats Refresh Interval (seconds)", required: true, defaultValue: 60
+        }
+        
+        section("Zones & Metadata") {
+            input "enableZoneDevices", "bool", title: "Create zone child devices", required: true, defaultValue: true
         }
         
         section("Frigate Server") {
@@ -82,12 +353,15 @@ def updated() {
 }
 
 def initialize() {
-    log.info "Frigate Parent App: Initializing v1.06"
+    log.info "Frigate Parent App: Initializing v1.09"
     
-    // Initialize state for tracking processed events
-    if (!state.processedEventIds) {
-        state.processedEventIds = []
-    }
+    // Initialize state structures
+    state.processedEventIds = state.processedEventIds ?: []
+    state.eventZoneMap = state.eventZoneMap ?: [:]
+    state.activeCameraEvents = state.activeCameraEvents ?: [:]
+    state.activeZoneEvents = state.activeZoneEvents ?: [:]
+    state.zoneChildMap = state.zoneChildMap ?: [:]
+    
     // Keep only last 100 event IDs to prevent state from growing too large
     if (state.processedEventIds.size() > 100) {
         state.processedEventIds = state.processedEventIds[-100..-1]
@@ -205,145 +479,139 @@ def handleEventMessage(String message) {
         log.debug "Frigate Parent App: handleEventMessage() called with message: ${message}"
     }
     
+    ensureStateMaps()
     try {
-        def event = new groovy.json.JsonSlurper().parseText(message)
-        
+        def parsedEvent = new groovy.json.JsonSlurper().parseText(message)
         if (debugLogging) {
-            log.debug "Frigate Parent App: Parsed event object keys: ${event.keySet()}"
+            log.debug "Frigate Parent App: Parsed event object keys: ${parsedEvent.keySet()}"
         }
         
-        // Frigate MQTT events format: {type, before, after}
-        // The "after" object contains the actual event data with camera, id, label, etc.
-        // The "before" object contains the previous state (for "update" events)
+        def eventType = parsedEvent.type ?: "update"
+        def eventPayload = (eventType == "end") ? (parsedEvent.before ?: parsedEvent.after ?: parsedEvent) : (parsedEvent.after ?: parsedEvent)
+        def cameraName = eventPayload.camera?.toString()
+        def eventId = eventPayload.id?.toString()
         
-        def eventType = event.type  // "new", "update", or "end"
-        // Frigate uses 'after' for new/update and 'before' for end
-        def eventData = (eventType == "end") ? (event.before ?: event) : (event.after ?: event)
-        
-        // Extract camera name and event ID
-        def cameraName = eventData.camera
-        def eventId = eventData.id
-        
-        if (debugLogging) {
-            log.debug "Frigate Parent App: Event details - Type: ${eventType}, Camera: ${cameraName}, ID: ${eventId}"
+        if (!cameraName) {
+            log.warn "Frigate Parent App: Event has no camera name - cannot process"
+            if (debugLogging) {
+                log.debug "Frigate Parent App: Event structure: ${groovy.json.JsonOutput.toJson(parsedEvent)}"
+            }
+            return
         }
         
-        // Process lifecycle:
-        // - new: set motion active, update detection
-        // - update: keep motion active, refresh detection if provided
-        // - end: set motion inactive
+        def deviceId = "frigate_${cameraName}"
+        def childDevice = getChildDevice(deviceId)
+        if (!childDevice) {
+            log.warn "Frigate Parent App: No child device found for camera: ${cameraName} (searched for device ID: ${deviceId})"
+            return
+        }
         
-        // Deduplicate only 'new' events so we still process updates and end
-        if (eventType == "new") {
-            if (eventId && state.processedEventIds?.contains(eventId)) {
+        if (eventType == "new" && eventId) {
+            if (state.processedEventIds.contains(eventId)) {
                 if (debugLogging) {
                     log.debug "Frigate Parent App: Already processed NEW event ${eventId} for camera ${cameraName}"
                 }
                 return
             }
-            if (eventId) {
-                state.processedEventIds = state.processedEventIds ?: []
-                state.processedEventIds.add(eventId)
-                if (state.processedEventIds.size() > 100) {
-                    state.processedEventIds = state.processedEventIds[-100..-1]
-                }
+            state.processedEventIds.add(eventId)
+            if (state.processedEventIds.size() > 100) {
+                state.processedEventIds = state.processedEventIds[-100..-1]
             }
-            // On motion start, publish an event snapshot URL to the device for persistent viewing
+        }
+        
+        def label = eventPayload.label ?: eventPayload.sub_label
+        if (label == "animal" && eventPayload.sub_label) {
+            label = eventPayload.sub_label
+        }
+        def scoreValue = eventPayload.data?.score ?: eventPayload.data?.top_score ?: eventPayload.top_score ?: eventPayload.confidence ?: 0.0
+        BigDecimal score
+        try {
+            score = new BigDecimal(scoreValue.toString())
+        } catch (Exception ignored) {
+            score = 0.0G
+        }
+        
+        def currentZones = normalizeZoneList(eventPayload.current_zones ?: eventPayload.zones)
+        def enteredZones = normalizeZoneList(eventPayload.entered_zones)
+        def previousZones = normalizeZoneList(eventPayload.previous_zones)
+        def storedZonesForEvent = state.eventZoneMap[eventId] ?: []
+        if (eventType == "end" && eventId) {
+            currentZones = storedZonesForEvent
+        }
+        
+        def snapshotUrl = buildSnapshotUrl(eventId, eventPayload.snapshot)
+        def clipUrl = buildClipUrl(eventId, eventPayload.clip ?: eventPayload.clips)
+        def startTime = formatTimestamp(eventPayload.start_time)
+        def endTime = formatTimestamp(eventPayload.end_time)
+        def motionScore = eventPayload.motion_score ?: eventPayload.data?.motion_score
+        def trackId = eventPayload.track_id ?: eventPayload.data?.id
+        
+        def metadata = [
+            eventId             : eventId,
+            cameraName          : cameraName,
+            label               : label,
+            confidence          : score,
+            currentZones        : currentZones,
+            enteredZones        : enteredZones,
+            previousZones       : previousZones,
+            hasSnapshot         : (eventPayload.has_snapshot == true),
+            hasClip             : (eventPayload.has_clip == true),
+            snapshotUrl         : snapshotUrl,
+            lastMotionSnapshotUrl: snapshotUrl,
+            clipUrl             : clipUrl,
+            startTime           : startTime,
+            endTime             : endTime,
+            motionScore         : motionScore,
+            trackId             : trackId
+        ]
+        
+        if (eventType == "new" && eventId && snapshotUrl) {
             try {
-                def eventSnapshotUrl = "http://${frigateServer}:${frigatePort}/api/events/${eventId}/snapshot.jpg?bbox=1&timestamp=1"
-                def childForSnapshot = getChildDevice("frigate_${cameraName}")
-                if (childForSnapshot) {
-                    childForSnapshot.updateLastMotionSnapshotUrl(eventSnapshotUrl)
-                    if (debugLogging) {
-                        log.debug "Frigate Parent App: Set last motion snapshot URL for ${cameraName}: ${eventSnapshotUrl}"
-                    }
-                }
+                childDevice.updateLastMotionSnapshotUrl(snapshotUrl)
+            } catch (Exception ignored) {}
+        } else if (eventType == "new" && eventId && !snapshotUrl) {
+            try {
+                def fallbackSnapshot = buildEventSnapshotUrl(eventId)
+                childDevice.updateLastMotionSnapshotUrl(fallbackSnapshot)
+                metadata.snapshotUrl = fallbackSnapshot
+                metadata.lastMotionSnapshotUrl = fallbackSnapshot
             } catch (Exception ignored) {}
         }
         
-        // Use eventData instead of event for the rest of the processing
-        event = eventData
+        // Manage active camera event lifecycle
+        if (eventType == "end") {
+            removeActiveCameraEvent(cameraName, eventId)
+        } else {
+            addActiveCameraEvent(cameraName, eventId)
+        }
         
-        if (cameraName) {
-            def deviceId = "frigate_${cameraName}"
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Looking for child device with ID: ${deviceId}"
-            }
-            
-            def childDevice = getChildDevice(deviceId)
-            
-            if (childDevice) {
-                if (debugLogging) {
-                    log.debug "Frigate Parent App: Found child device: ${childDevice.label} (${deviceId})"
-                }
-                
-                // Get label and score - handle MQTT format
-                // Frigate MQTT events have label directly, and score in data object
-                def label = event.label ?: event.sub_label
-                def score = event.data?.score ?: event.data?.top_score ?: event.top_score ?: 0.0
-
-                if (label == "animal" && event.sub_label) {
-                    label = event.sub_label
-                }
-
-                try {
-                    score = new BigDecimal(score.toString())
-                } catch (Exception ignored) {
-                    score = 0.0
-                }
-                
-                if (debugLogging) {
-                    log.debug "Frigate Parent App: Detection - Label: ${label}, Score: ${score}, Event Type: ${eventType}"
-                }
-                
-                // Motion lifecycle
-                if (eventType == "end") {
-                    if (debugLogging) {
-                        log.debug "Frigate Parent App: Calling updateMotionState('inactive') on device ${deviceId} (end event)"
-                    }
-                    childDevice.updateMotionState("inactive")
+        childDevice.updateEventMetadata(metadata)
+        
+        if (eventType == "end") {
+            if (!cameraHasActiveEvents(cameraName)) {
+                childDevice.clearDetections()
+                if (eventId) {
+                    log.info "Frigate Parent App: Motion ended on ${cameraName} - Event ID: ${eventId}"
                 } else {
-                    // new or update
-                    if (debugLogging) {
-                        log.debug "Frigate Parent App: Calling updateMotionState('active') on device ${deviceId} (${eventType ?: 'implicit'})"
-                    }
-                    childDevice.updateMotionState("active")
+                    log.info "Frigate Parent App: Motion ended on ${cameraName}"
                 }
-                
-                // Update specific object detection on new/update
-                if (label && eventType != "end") {
-                    if (debugLogging) {
-                        log.debug "Frigate Parent App: Calling updateObjectDetection('${label}', ${score}) on device ${deviceId}"
-                    }
-                    childDevice.updateObjectDetection(label, score)
-                    log.info "Frigate Parent App: Event processed - ${cameraName}: ${label} (${score}) - Event ID: ${eventId}"
-                } else {
-                    // If no label provided, we already updated motion above
-                    if (debugLogging) {
-                        log.debug "Frigate Parent App: No label update for device ${deviceId} (type: ${eventType})"
-                    }
-                    if (eventType == "new") {
-                        log.info "Frigate Parent App: Motion started on ${cameraName} - Event ID: ${eventId}"
-                    } else if (eventType == "end") {
-                        log.info "Frigate Parent App: Motion ended on ${cameraName} - Event ID: ${eventId}"
-                    }
-                }
-                
-                if (debugLogging) {
-                    log.debug "Frigate Parent App: Successfully updated device ${deviceId} - ${label ?: 'motion'} detected with confidence ${score}"
-                }
-            } else {
-                log.warn "Frigate Parent App: No child device found for camera: ${cameraName} (searched for device ID: ${deviceId})"
-                if (debugLogging) {
-                    def allDevices = getChildDevices()
-                    log.debug "Frigate Parent App: Available child devices: ${allDevices.collect { it.deviceNetworkId }}"
-                }
+            } else if (debugLogging) {
+                log.debug "Frigate Parent App: Camera ${cameraName} still has active events after ending ${eventId}"
             }
         } else {
-            log.warn "Frigate Parent App: Event has no camera name - cannot process"
-            if (debugLogging) {
-                log.debug "Frigate Parent App: Event structure: ${groovy.json.JsonOutput.toJson(event)}"
+            childDevice.updateMotionState("active")
+            if (label) {
+                childDevice.updateObjectDetection(label, score)
+                log.info "Frigate Parent App: Event processed - ${cameraName}: ${label} (${score}) - Event ID: ${eventId}"
+            } else if (eventType == "new") {
+                log.info "Frigate Parent App: Motion started on ${cameraName} - Event ID: ${eventId}"
             }
+        }
+        
+        if (zonesEnabled() && eventId) {
+            handleZoneEvents(cameraName, eventId, eventType, metadata, currentZones, enteredZones, label, score)
+        } else if (eventType == "end" && eventId) {
+            state.eventZoneMap.remove(eventId)
         }
         
     } catch (Exception e) {
@@ -398,16 +666,34 @@ def removeObsoleteCameraDevices(List currentCameras) {
     def allChildDevices = getChildDevices()
     
     allChildDevices.each { device ->
-        def deviceName = device.deviceNetworkId.replace("frigate_", "")
+        def dni = device.deviceNetworkId
+        if (!dni?.startsWith("frigate_")) {
+            return
+        }
+        def remainder = dni.substring("frigate_".length())
         
         // Skip the MQTT bridge device - it's not a camera
-        if (deviceName == "mqtt_bridge") {
+        if (remainder == "mqtt_bridge") {
             return
         }
         
-        if (!currentCameras.contains(deviceName)) {
-            log.info "Frigate Parent App: Removing obsolete device for camera: ${deviceName}"
-            deleteChildDevice(device.deviceNetworkId)
+        def zoneIndex = remainder.indexOf("_zone_")
+        if (zoneIndex > -1) {
+            def cameraName = remainder.substring(0, zoneIndex)
+            if (!currentCameras.contains(cameraName)) {
+                log.info "Frigate Parent App: Removing obsolete zone device ${dni}"
+                if (state.activeZoneEvents) {
+                    state.activeZoneEvents = state.activeZoneEvents.findAll { key, value -> !key.startsWith("${cameraName}__") }
+                }
+                if (state.zoneChildMap) {
+                    state.zoneChildMap = state.zoneChildMap.findAll { entry -> entry.value != dni }
+                }
+                deleteChildDevice(dni)
+            }
+        } else if (!currentCameras.contains(remainder)) {
+            log.info "Frigate Parent App: Removing obsolete device for camera: ${remainder}"
+            state.activeCameraEvents?.remove(remainder)
+            deleteChildDevice(dni)
         }
     }
 }

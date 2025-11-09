@@ -13,10 +13,11 @@
  * 1.03 - 2025-10-31 - Replaced non-existent capability 'Image' with standard 'Image Capture'; added take() to fetch snapshot
  * 1.04 - 2025-10-31 - Renamed driver to "Frigate Camera Device" to reflect broader scope
  * 1.05 - 2025-11-07 - Added safe confidence casting, motion threshold normalization, and improved detection logging
+ * 1.06 - 2025-11-08 - Added switch capability, zone-aware metadata, and support for event clips/snapshots
  * 
  * @author Simon Mason
- * @version 1.05
- * @date 2025-11-07
+ * @version 1.06
+ * @date 2025-11-08
  */
 
 metadata {
@@ -32,6 +33,7 @@ metadata {
         importUrl: ""
     ) {
         capability "MotionSensor"
+        capability "Switch"
         capability "Refresh"
         // Removed Image Capture to avoid showing a Take button that always returns latest.jpg
         
@@ -47,6 +49,21 @@ metadata {
         attribute "lastUpdate", "string"
         attribute "latestSnapshotUrl", "string"
         attribute "lastMotionSnapshotUrl", "string"
+        attribute "lastSnapshotUrl", "string"
+        attribute "lastClipUrl", "string"
+        attribute "hasSnapshot", "string"
+        attribute "hasClip", "string"
+        attribute "currentZones", "string"
+        attribute "enteredZones", "string"
+        attribute "previousZones", "string"
+        attribute "lastEventId", "string"
+        attribute "lastEventLabel", "string"
+        attribute "lastEventConfidence", "number"
+        attribute "lastEventStart", "string"
+        attribute "lastEventEnd", "string"
+        attribute "motionScore", "number"
+        attribute "trackId", "string"
+        attribute "zoneName", "string"
         
         // Commands
         command "refresh"
@@ -55,6 +72,7 @@ metadata {
         command "getStats"
         command "updateLatestSnapshotUrl", ["string"]
         command "updateLastMotionSnapshotUrl", ["string"]
+        command "clearDetections"
     }
     
     preferences {
@@ -92,6 +110,21 @@ def initialize() {
     sendEvent(name: "objectType", value: "none")
     sendEvent(name: "cameraName", value: device.label.replace("Frigate ", "").replace(" ", "_").toLowerCase())
     sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
+    sendEvent(name: "switch", value: "off")
+    sendEvent(name: "lastSnapshotUrl", value: "")
+    sendEvent(name: "lastClipUrl", value: "")
+    sendEvent(name: "hasSnapshot", value: "no")
+    sendEvent(name: "hasClip", value: "no")
+    sendEvent(name: "currentZones", value: "none")
+    sendEvent(name: "enteredZones", value: "none")
+    sendEvent(name: "previousZones", value: "none")
+    sendEvent(name: "lastEventId", value: "")
+    sendEvent(name: "lastEventLabel", value: "")
+    sendEvent(name: "lastEventConfidence", value: 0.0)
+    sendEvent(name: "lastEventStart", value: "")
+    sendEvent(name: "lastEventEnd", value: "")
+    sendEvent(name: "motionScore", value: 0.0)
+    sendEvent(name: "trackId", value: "")
     
 }
 
@@ -119,6 +152,7 @@ def updateMotionState(String state) {
         }
         
         sendEvent(name: "motion", value: state)
+        sendEvent(name: "switch", value: (state == "active") ? "on" : "off")
         sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
         
         if (state == "active") {
@@ -134,6 +168,20 @@ def updateMotionState(String state) {
             log.debug "Frigate Camera Device: State unchanged (${state}), not modifying timeout"
         }
     }
+}
+
+def on() {
+    if (debugLogging) {
+        log.debug "Frigate Camera Device: on() called, forcing motion active"
+    }
+    updateMotionState("active")
+}
+
+def off() {
+    if (debugLogging) {
+        log.debug "Frigate Camera Device: off() called, forcing motion inactive"
+    }
+    updateMotionState("inactive")
 }
 
 def updateObjectDetection(String objectType, Number confidence) {
@@ -221,6 +269,18 @@ def updateObjectDetection(String objectType, Number confidence) {
 
 // No motion timeout logic; motion goes inactive on 'end' events from Frigate
 
+def clearDetections() {
+    if (debugLogging) {
+        log.debug "Frigate Camera Device: clearDetections() called for ${device.label}"
+    }
+    ["personDetected", "carDetected", "dogDetected", "catDetected"].each { attr ->
+        sendEvent(name: attr, value: "no")
+    }
+    sendEvent(name: "objectType", value: "none")
+    sendEvent(name: "confidence", value: 0.0)
+    updateMotionState("inactive")
+}
+
 def getStats() {
     log.info "Frigate Camera Device: Requesting stats for ${device.label}"
     parent?.getCameraStats(device.deviceNetworkId)
@@ -253,6 +313,84 @@ def updateLastMotionSnapshotUrl(String imageUrl) {
         sendEvent(name: "image", value: imageUrl)
     }
     sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
+}
+
+def updateEventMetadata(Map data) {
+    if (!data) {
+        return
+    }
+    if (debugLogging) {
+        log.debug "Frigate Camera Device: updateEventMetadata() called with data: ${data}"
+    }
+    def nowTs = new Date().format("yyyy-MM-dd HH:mm:ss")
+    
+    if (data.cameraName) {
+        sendEvent(name: "cameraName", value: data.cameraName)
+    }
+    if (data.zoneName) {
+        sendEvent(name: "zoneName", value: data.zoneName)
+    }
+    if (data.currentZones != null) {
+        def value = data.currentZones instanceof Collection ? data.currentZones.join(",") : data.currentZones.toString()
+        sendEvent(name: "currentZones", value: value ?: "none")
+    }
+    if (data.enteredZones != null) {
+        def value = data.enteredZones instanceof Collection ? data.enteredZones.join(",") : data.enteredZones.toString()
+        sendEvent(name: "enteredZones", value: value ?: "none")
+    }
+    if (data.previousZones != null) {
+        def value = data.previousZones instanceof Collection ? data.previousZones.join(",") : data.previousZones.toString()
+        sendEvent(name: "previousZones", value: value ?: "none")
+    }
+    if (data.eventId) {
+        sendEvent(name: "lastEventId", value: data.eventId)
+    }
+    if (data.label != null) {
+        sendEvent(name: "lastEventLabel", value: data.label)
+    }
+    if (data.confidence != null) {
+        try {
+            sendEvent(name: "lastEventConfidence", value: new BigDecimal(data.confidence.toString()))
+        } catch (Exception ignored) {
+            sendEvent(name: "lastEventConfidence", value: 0.0)
+        }
+    }
+    if (data.startTime != null) {
+        sendEvent(name: "lastEventStart", value: data.startTime.toString())
+    }
+    if (data.endTime != null) {
+        sendEvent(name: "lastEventEnd", value: data.endTime.toString())
+    }
+    if (data.motionScore != null) {
+        try {
+            sendEvent(name: "motionScore", value: new BigDecimal(data.motionScore.toString()))
+        } catch (Exception ignored) {
+            sendEvent(name: "motionScore", value: 0.0)
+        }
+    }
+    if (data.trackId != null) {
+        sendEvent(name: "trackId", value: data.trackId.toString())
+    }
+    
+    if (data.hasSnapshot != null) {
+        sendEvent(name: "hasSnapshot", value: data.hasSnapshot ? "yes" : "no")
+    }
+    if (data.hasClip != null) {
+        sendEvent(name: "hasClip", value: data.hasClip ? "yes" : "no")
+    }
+    if (data.snapshotUrl) {
+        sendEvent(name: "lastSnapshotUrl", value: data.snapshotUrl)
+        sendEvent(name: "latestSnapshotUrl", value: data.snapshotUrl)
+        sendEvent(name: "image", value: data.snapshotUrl)
+    }
+    if (data.clipUrl) {
+        sendEvent(name: "lastClipUrl", value: data.clipUrl)
+    }
+    if (data.lastMotionSnapshotUrl) {
+        updateLastMotionSnapshotUrl(data.lastMotionSnapshotUrl)
+    }
+    
+    sendEvent(name: "lastUpdate", value: nowTs)
 }
 
 
