@@ -11,10 +11,11 @@
  * 1.00 - Initial release - MQTT bridge device for parent app communication
  * 1.01 - 2025-10-31 - Added device-level Debug preference; removed Parent App debug influence; logging now controlled solely by device setting
  * 1.02 - 2025-11-07 - Added Initialize capability and automatic reconnection on hub start; connection health check
+ * 1.03 - 2025-11-14 - PERFORMANCE: Removed full JSON parsing for event summary logging; now uses regex to extract only type/camera/id fields. Eliminates double parsing of 60KB+ payloads.
  *
  * @author Simon Mason
- * @version 1.02
- * @date 2025-11-07
+ * @version 1.03
+ * @date 2025-11-14
  */
 
 metadata {
@@ -243,19 +244,50 @@ def parse(String message) {
             if (debugLogging) {
                 log.debug "Frigate MQTT Bridge: Forwarding event message to parent app"
             }
-            // Emit concise summary of event type/camera/id for visibility
+            // Extract concise summary using regex to avoid full JSON parsing of 60KB+ payloads
             try {
-                def evt = new groovy.json.JsonSlurper().parseText(payload)
-                def evtType = evt?.type
-                def evtData = (evtType == "end") ? (evt?.before ?: [:]) : (evt?.after ?: evt)
-                def cam = evtData?.camera
-                def evtId = evtData?.id
+                def evtType = "unknown"
+                def cam = "unknown"
+                def evtId = "unknown"
+                
+                // Extract type from root level
+                def typeMatch = payload =~ /"type"\s*:\s*"([^"]+)"/
+                if (typeMatch) {
+                    evtType = typeMatch[0][1]
+                }
+                
+                // Extract camera - try to find in "after" or "before" sections first, then root
+                def cameraInAfter = payload =~ /"after"\s*:\s*\{[^}]*"camera"\s*:\s*"([^"]+)"/
+                def cameraInBefore = payload =~ /"before"\s*:\s*\{[^}]*"camera"\s*:\s*"([^"]+)"/
+                def cameraInRoot = payload =~ /"camera"\s*:\s*"([^"]+)"/
+                
+                if (cameraInAfter) {
+                    cam = cameraInAfter[0][1]
+                } else if (cameraInBefore) {
+                    cam = cameraInBefore[0][1]
+                } else if (cameraInRoot) {
+                    cam = cameraInRoot[0][1]
+                }
+                
+                // Extract id - try to find in "after" or "before" sections first, then root
+                def idInAfter = payload =~ /"after"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"/
+                def idInBefore = payload =~ /"before"\s*:\s*\{[^}]*"id"\s*:\s*"([^"]+)"/
+                def idInRoot = payload =~ /"id"\s*:\s*"([^"]+)"/
+                
+                if (idInAfter) {
+                    evtId = idInAfter[0][1]
+                } else if (idInBefore) {
+                    evtId = idInBefore[0][1]
+                } else if (idInRoot) {
+                    evtId = idInRoot[0][1]
+                }
+                
                 if (debugLogging) {
-                    log.debug "Frigate MQTT Bridge: Event summary - type=${evtType ?: 'unknown'}, camera=${cam ?: 'unknown'}, id=${evtId ?: 'unknown'} (${payload?.size() ?: 0} bytes)"
+                    log.debug "Frigate MQTT Bridge: Event summary - type=${evtType}, camera=${cam}, id=${evtId} (${payload?.size() ?: 0} bytes)"
                 }
             } catch (Exception ex) {
                 if (debugLogging) {
-                    log.debug "Frigate MQTT Bridge: Event summary parse error: ${ex.message}"
+                    log.debug "Frigate MQTT Bridge: Event summary extraction error: ${ex.message}"
                 }
             }
             // Call parent app method to handle events
