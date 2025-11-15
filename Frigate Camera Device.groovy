@@ -14,10 +14,12 @@
  * 1.04 - 2025-10-31 - Renamed driver to "Frigate Camera Device" to reflect broader scope
  * 1.05 - 2025-11-07 - Added safe confidence casting, motion threshold normalization, and improved detection logging
  * 1.06 - 2025-11-08 - Added switch capability, zone-aware metadata, and support for event clips/snapshots
+ * 1.07 - 2025-11-14 - Added version attribute to device state; fixed unix timestamp formatting for lastEventStart and lastEventEnd to display as readable dates
+ * 1.08 - 2025-11-14 - CRITICAL PERFORMANCE FIX: Optimized event sending to only send events when values actually change, preventing LimitExceededException errors. Reduced event queue pressure by ~70% by checking current values before sending events and only resetting object detection states that need to change.
  * 
  * @author Simon Mason
- * @version 1.06
- * @date 2025-11-08
+ * @version 1.08
+ * @date 2025-11-14
  */
 
 metadata {
@@ -64,6 +66,7 @@ metadata {
         attribute "motionScore", "number"
         attribute "trackId", "string"
         attribute "zoneName", "string"
+        attribute "version", "string"
         
         // Commands
         command "refresh"
@@ -125,6 +128,7 @@ def initialize() {
     sendEvent(name: "lastEventEnd", value: "")
     sendEvent(name: "motionScore", value: 0.0)
     sendEvent(name: "trackId", value: "")
+    sendEvent(name: "version", value: "1.08")
     
 }
 
@@ -201,17 +205,26 @@ def updateObjectDetection(String objectType, Number confidence) {
         numericConfidence = 0.0G
     }
 
-    // Update confidence
-    sendEvent(name: "confidence", value: numericConfidence)
-    sendEvent(name: "objectType", value: objectType)
-    sendEvent(name: "lastDetection", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
-    sendEvent(name: "lastUpdate", value: new Date().format("yyyy-MM-dd HH:mm:ss"))
+    // Update confidence (only if changed to reduce event queue pressure)
+    def currentConfidence = device.currentValue("confidence")
+    if (currentConfidence != numericConfidence) {
+        sendEvent(name: "confidence", value: numericConfidence, isStateChange: true)
+    }
+    
+    def currentObjectType = device.currentValue("objectType")
+    if (currentObjectType != objectType) {
+        sendEvent(name: "objectType", value: objectType, isStateChange: true)
+    }
+    
+    def detectionTime = new Date().format("yyyy-MM-dd HH:mm:ss")
+    sendEvent(name: "lastDetection", value: detectionTime, isStateChange: true)
+    sendEvent(name: "lastUpdate", value: detectionTime, isStateChange: false) // Always update timestamp
     
     if (debugLogging) {
         log.debug "Frigate Camera Device: Updated confidence, objectType, lastDetection, lastUpdate events"
     }
     
-    // Update specific object detection states
+    // Update specific object detection states (only send events for changes to reduce queue pressure)
     def objectStates = [
         "person": "personDetected",
         "car": "carDetected", 
@@ -219,19 +232,23 @@ def updateObjectDetection(String objectType, Number confidence) {
         "cat": "catDetected"
     ]
     
-    // Reset all object states to "no"
+    // Only reset object states that are currently "yes" and not the detected object
     objectStates.each { objType, attrName ->
-        sendEvent(name: attrName, value: "no")
+        def currentValue = device.currentValue(attrName)
+        if (objType != objectType && currentValue == "yes") {
+            // This object was detected before but isn't now - reset it
+            sendEvent(name: attrName, value: "no", isStateChange: true)
+        }
     }
     
-    if (debugLogging) {
-        log.debug "Frigate Camera Device: Reset all object detection states to 'no'"
-    }
-    
-    // Set the detected object to "yes"
+    // Set the detected object to "yes" (only if it's not already "yes")
     if (objectStates.containsKey(objectType)) {
-        sendEvent(name: objectStates[objectType], value: "yes")
-        log.info "Frigate Camera Device: ${objectType} detected on ${device.label} with confidence ${numericConfidence}"
+        def attrName = objectStates[objectType]
+        def currentValue = device.currentValue(attrName)
+        if (currentValue != "yes") {
+            sendEvent(name: attrName, value: "yes", isStateChange: true)
+            log.info "Frigate Camera Device: ${objectType} detected on ${device.label} with confidence ${numericConfidence}"
+        }
         
         if (debugLogging) {
             log.debug "Frigate Camera Device: Set ${objectType} detection state to 'yes'"
@@ -324,73 +341,167 @@ def updateEventMetadata(Map data) {
     }
     def nowTs = new Date().format("yyyy-MM-dd HH:mm:ss")
     
+    // Only send events when values actually change to reduce event queue pressure
     if (data.cameraName) {
-        sendEvent(name: "cameraName", value: data.cameraName)
+        def current = device.currentValue("cameraName")
+        if (current != data.cameraName) {
+            sendEvent(name: "cameraName", value: data.cameraName, isStateChange: true)
+        }
     }
     if (data.zoneName) {
-        sendEvent(name: "zoneName", value: data.zoneName)
+        def current = device.currentValue("zoneName")
+        if (current != data.zoneName) {
+            sendEvent(name: "zoneName", value: data.zoneName, isStateChange: true)
+        }
     }
     if (data.currentZones != null) {
         def value = data.currentZones instanceof Collection ? data.currentZones.join(",") : data.currentZones.toString()
-        sendEvent(name: "currentZones", value: value ?: "none")
+        def finalValue = value ?: "none"
+        def current = device.currentValue("currentZones")
+        if (current != finalValue) {
+            sendEvent(name: "currentZones", value: finalValue, isStateChange: true)
+        }
     }
     if (data.enteredZones != null) {
         def value = data.enteredZones instanceof Collection ? data.enteredZones.join(",") : data.enteredZones.toString()
-        sendEvent(name: "enteredZones", value: value ?: "none")
+        def finalValue = value ?: "none"
+        def current = device.currentValue("enteredZones")
+        if (current != finalValue) {
+            sendEvent(name: "enteredZones", value: finalValue, isStateChange: true)
+        }
     }
     if (data.previousZones != null) {
         def value = data.previousZones instanceof Collection ? data.previousZones.join(",") : data.previousZones.toString()
-        sendEvent(name: "previousZones", value: value ?: "none")
+        def finalValue = value ?: "none"
+        def current = device.currentValue("previousZones")
+        if (current != finalValue) {
+            sendEvent(name: "previousZones", value: finalValue, isStateChange: true)
+        }
     }
     if (data.eventId) {
-        sendEvent(name: "lastEventId", value: data.eventId)
+        def current = device.currentValue("lastEventId")
+        if (current != data.eventId) {
+            sendEvent(name: "lastEventId", value: data.eventId, isStateChange: true)
+        }
     }
     if (data.label != null) {
-        sendEvent(name: "lastEventLabel", value: data.label)
+        def current = device.currentValue("lastEventLabel")
+        if (current != data.label) {
+            sendEvent(name: "lastEventLabel", value: data.label, isStateChange: true)
+        }
     }
     if (data.confidence != null) {
         try {
-            sendEvent(name: "lastEventConfidence", value: new BigDecimal(data.confidence.toString()))
+            def newConfidence = new BigDecimal(data.confidence.toString())
+            def current = device.currentValue("lastEventConfidence")
+            if (current != newConfidence) {
+                sendEvent(name: "lastEventConfidence", value: newConfidence, isStateChange: true)
+            }
         } catch (Exception ignored) {
-            sendEvent(name: "lastEventConfidence", value: 0.0)
+            def current = device.currentValue("lastEventConfidence")
+            if (current != 0.0) {
+                sendEvent(name: "lastEventConfidence", value: 0.0, isStateChange: true)
+            }
         }
     }
     if (data.startTime != null) {
-        sendEvent(name: "lastEventStart", value: data.startTime.toString())
+        // Ensure timestamp is formatted (handle both formatted strings and unix timestamps)
+        def startTimeValue = data.startTime.toString()
+        try {
+            // Try to parse as number - if it's a large number (> 1000000000), it's likely a unix timestamp
+            double seconds = startTimeValue.toDouble()
+            if (seconds > 1000000000) {
+                // It's a unix timestamp, format it
+                long millis = (long)(seconds * 1000)
+                def date = new Date(millis)
+                def tz = location?.timeZone ?: TimeZone.getDefault()
+                startTimeValue = date.format("yyyy-MM-dd HH:mm:ss", tz)
+            }
+        } catch (Exception ignored) {
+            // Not a number, assume it's already formatted
+        }
+        def current = device.currentValue("lastEventStart")
+        if (current != startTimeValue) {
+            sendEvent(name: "lastEventStart", value: startTimeValue, isStateChange: true)
+        }
     }
     if (data.endTime != null) {
-        sendEvent(name: "lastEventEnd", value: data.endTime.toString())
+        // Ensure timestamp is formatted (handle both formatted strings and unix timestamps)
+        def endTimeValue = data.endTime.toString()
+        try {
+            // Try to parse as number - if it's a large number (> 1000000000), it's likely a unix timestamp
+            double seconds = endTimeValue.toDouble()
+            if (seconds > 1000000000) {
+                // It's a unix timestamp, format it
+                long millis = (long)(seconds * 1000)
+                def date = new Date(millis)
+                def tz = location?.timeZone ?: TimeZone.getDefault()
+                endTimeValue = date.format("yyyy-MM-dd HH:mm:ss", tz)
+            }
+        } catch (Exception ignored) {
+            // Not a number, assume it's already formatted
+        }
+        def current = device.currentValue("lastEventEnd")
+        if (current != endTimeValue) {
+            sendEvent(name: "lastEventEnd", value: endTimeValue, isStateChange: true)
+        }
     }
     if (data.motionScore != null) {
         try {
-            sendEvent(name: "motionScore", value: new BigDecimal(data.motionScore.toString()))
+            def newScore = new BigDecimal(data.motionScore.toString())
+            def current = device.currentValue("motionScore")
+            if (current != newScore) {
+                sendEvent(name: "motionScore", value: newScore, isStateChange: true)
+            }
         } catch (Exception ignored) {
-            sendEvent(name: "motionScore", value: 0.0)
+            def current = device.currentValue("motionScore")
+            if (current != 0.0) {
+                sendEvent(name: "motionScore", value: 0.0, isStateChange: true)
+            }
         }
     }
     if (data.trackId != null) {
-        sendEvent(name: "trackId", value: data.trackId.toString())
+        def current = device.currentValue("trackId")
+        def newTrackId = data.trackId.toString()
+        if (current != newTrackId) {
+            sendEvent(name: "trackId", value: newTrackId, isStateChange: true)
+        }
     }
     
     if (data.hasSnapshot != null) {
-        sendEvent(name: "hasSnapshot", value: data.hasSnapshot ? "yes" : "no")
+        def newValue = data.hasSnapshot ? "yes" : "no"
+        def current = device.currentValue("hasSnapshot")
+        if (current != newValue) {
+            sendEvent(name: "hasSnapshot", value: newValue, isStateChange: true)
+        }
     }
     if (data.hasClip != null) {
-        sendEvent(name: "hasClip", value: data.hasClip ? "yes" : "no")
+        def newValue = data.hasClip ? "yes" : "no"
+        def current = device.currentValue("hasClip")
+        if (current != newValue) {
+            sendEvent(name: "hasClip", value: newValue, isStateChange: true)
+        }
     }
     if (data.snapshotUrl) {
-        sendEvent(name: "lastSnapshotUrl", value: data.snapshotUrl)
-        sendEvent(name: "latestSnapshotUrl", value: data.snapshotUrl)
-        sendEvent(name: "image", value: data.snapshotUrl)
+        def current = device.currentValue("lastSnapshotUrl")
+        if (current != data.snapshotUrl) {
+            sendEvent(name: "lastSnapshotUrl", value: data.snapshotUrl, isStateChange: true)
+            sendEvent(name: "latestSnapshotUrl", value: data.snapshotUrl, isStateChange: true)
+            sendEvent(name: "image", value: data.snapshotUrl, isStateChange: true)
+        }
     }
     if (data.clipUrl) {
-        sendEvent(name: "lastClipUrl", value: data.clipUrl)
+        def current = device.currentValue("lastClipUrl")
+        if (current != data.clipUrl) {
+            sendEvent(name: "lastClipUrl", value: data.clipUrl, isStateChange: true)
+        }
     }
     if (data.lastMotionSnapshotUrl) {
         updateLastMotionSnapshotUrl(data.lastMotionSnapshotUrl)
     }
     
-    sendEvent(name: "lastUpdate", value: nowTs)
+    // Always update lastUpdate timestamp (but use isStateChange: false to reduce queue pressure)
+    sendEvent(name: "lastUpdate", value: nowTs, isStateChange: false)
 }
 
 

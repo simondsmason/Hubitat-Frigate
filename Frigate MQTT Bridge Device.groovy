@@ -12,9 +12,10 @@
  * 1.01 - 2025-10-31 - Added device-level Debug preference; removed Parent App debug influence; logging now controlled solely by device setting
  * 1.02 - 2025-11-07 - Added Initialize capability and automatic reconnection on hub start; connection health check
  * 1.03 - 2025-11-14 - PERFORMANCE: Removed full JSON parsing for event summary logging; now uses regex to extract only type/camera/id fields. Eliminates double parsing of 60KB+ payloads.
+ * 1.04 - 2025-11-14 - SECURITY: Moved MQTT password from state variables to dataValue to prevent password exposure in device state display
  *
  * @author Simon Mason
- * @version 1.03
+ * @version 1.04
  * @date 2025-11-14
  */
 
@@ -35,6 +36,7 @@ metadata {
         
         attribute "connectionStatus", "string"
         attribute "lastMessage", "string"
+        attribute "version", "string"
         
         command "connect"
         command "disconnect"
@@ -52,6 +54,7 @@ preferences {
 def installed() {
     log.info "Frigate MQTT Bridge: Device installed"
     sendEvent(name: "connectionStatus", value: "disconnected")
+    sendEvent(name: "version", value: "1.04")
     // Wait briefly for parent to send configuration, then initialise
     runIn(2, "initialize")
 }
@@ -67,6 +70,11 @@ def initialize() {
     log.info "Frigate MQTT Bridge: Initializing"
     unschedule()
     runEvery5Minutes("ensureConnected")
+    // Migrate password from state to dataValue if it exists in state (one-time migration)
+    if (state.mqttPassword && !device.getDataValue("mqttPassword")) {
+        updateDataValue("mqttPassword", state.mqttPassword)
+        state.mqttPassword = null // Remove from state
+    }
     if (state.mqttBroker) {
         connect()
     } else {
@@ -77,12 +85,14 @@ def initialize() {
 def configure(String broker, Number port, String username, String password, String topicPrefix) {
     log.info "Frigate MQTT Bridge: Configuration received from parent app"
     
-    // Store configuration in device state
+    // Store configuration in device state (non-sensitive data)
     state.mqttBroker = broker
     state.mqttPort = port
     state.mqttUsername = username
-    state.mqttPassword = password
     state.topicPrefix = topicPrefix
+    
+    // Store password in dataValue (not state) to prevent it from appearing in state variables display
+    updateDataValue("mqttPassword", password)
     
     // Connect after configuration
     runIn(1, "connect")
@@ -102,7 +112,8 @@ def connect() {
     def broker = state.mqttBroker
     def port = state.mqttPort ?: 1883
     def username = state.mqttUsername
-    def password = state.mqttPassword
+    // Get password from dataValue (not state) to keep it out of state variables display
+    def password = device.getDataValue("mqttPassword") ?: state.mqttPassword // Fallback to state for migration
     def topicPrefix = state.topicPrefix ?: "frigate"
     def debugLogging = isDebug()
     

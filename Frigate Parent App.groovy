@@ -13,12 +13,11 @@
  * 1.03 - CRITICAL FIX: Fixed null pointer error when using interfaces.mqtt in parent apps (interfaces.mqtt is only available in device drivers). Added automatic fallback to HTTP polling when MQTT is not available. All MQTT operations now check for availability before use. HTTP polling restored with improved event handling and 5-second interval.
  * 1.04 - MAJOR ARCHITECTURE CHANGE: Created Frigate MQTT Bridge Device driver to handle MQTT connectivity (parent apps cannot use interfaces.mqtt). Parent app now creates and manages a bridge device that connects to MQTT and forwards messages. Removed all HTTP event polling code. HTTP API now only used for snapshots and camera config checks. Real-time MQTT events via bridge device.
  * 1.05 - 2025-10-31 - Added snapshot retrieval to store image on child devices (base64 data URI) and snapshot URL; minor logging improvements for device creation and discovery; versioned init log
- *                    NOTE: Image download functionality (base64 storage) was later removed to prevent hub/device responsiveness issues
  * 1.06 - 2025-10-31 - Decoupled MQTT Bridge debug flag from Parent App; bridge debug controlled by device preference only
  * 1.07 - 2025-11-07 - Ensured bridge connectivity on init; normalized event labels and safe confidence parsing
  * 1.08 - 2025-11-08 - Added zone child devices, alert/motion metadata, and richer event tracking
  * 1.09 - 2025-11-08 - Guarded event/zone state maps during MQTT processing to prevent null pointer exceptions
- * 1.10 - 2025-11-14 - PERFORMANCE: Replaced full JSON parsing with selective field extraction using regex to avoid parsing 60KB+ payloads including unused path_data arrays. Removed double parsing in MQTT bridge device. Reduces memory usage by ~66% and processing time by ~90% for large events.
+ * 1.10 - 2025-11-14 - PERFORMANCE: Replaced full JSON parsing with selective field extraction using regex to avoid parsing 60KB+ payloads including unused path_data arrays. Removed double parsing in MQTT bridge device. Reduces memory usage by ~66% and processing time by ~90% for large events. Minor cleanup: removed unnecessary bridge device refresh call in updated() method.
  * 
  * @author Simon Mason
  * @version 1.10
@@ -521,13 +520,7 @@ def updated() {
     log.info "Frigate Parent App: Updating app"
     unsubscribe()
     
-    // Update MQTT bridge device configuration
-    def bridgeDevice = getChildDevice("frigate_mqtt_bridge")
-    if (bridgeDevice) {
-        log.info "Frigate Parent App: Updating MQTT bridge device"
-        bridgeDevice.refresh()
-    }
-    
+    // Initialize will reconfigure the MQTT bridge device with any updated settings (including password)
     initialize()
 }
 
@@ -986,26 +979,24 @@ def refreshStats() {
 // Removed: subscribeMQTT(), startMQTTPolling(), and pollMQTTMessages()
 // These have been replaced with native MQTT via interfaces.mqtt
 
-// DISABLED: Image download functionality removed to prevent hub/device responsiveness issues
-// This method previously stored snapshot URLs but is no longer used
-// def getCameraSnapshot(String cameraName) {
-//     log.info "Frigate Parent App: Setting snapshot URL for camera: ${cameraName}"
-//     try {
-//         def normalizedCamera = cameraName?.toString()?.replaceFirst(/^frigate_/, "")
-//         def url = "http://${frigateServer}:${frigatePort}/api/${normalizedCamera}/latest.jpg"
-//         def childId = "frigate_${normalizedCamera}"
-//         def child = getChildDevice(childId)
-//         if (child) {
-//             // Store URL-only to avoid large base64 attributes
-//             child.updateLatestSnapshotUrl(url)
-//             log.info "Frigate Parent App: Latest snapshot URL stored on device ${child.label}"
-//         } else {
-//             log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot URL"
-//         }
-//     } catch (Exception e) {
-//         log.error "Frigate Parent App: Error setting snapshot URL for ${cameraName}: ${e.message}"
-//     }
-// }
+def getCameraSnapshot(String cameraName) {
+    log.info "Frigate Parent App: Setting snapshot URL for camera: ${cameraName}"
+    try {
+        def normalizedCamera = cameraName?.toString()?.replaceFirst(/^frigate_/, "")
+        def url = "http://${frigateServer}:${frigatePort}/api/${normalizedCamera}/latest.jpg"
+        def childId = "frigate_${normalizedCamera}"
+        def child = getChildDevice(childId)
+        if (child) {
+            // Store URL-only to avoid large base64 attributes
+            child.updateLatestSnapshotUrl(url)
+            log.info "Frigate Parent App: Latest snapshot URL stored on device ${child.label}"
+        } else {
+            log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot URL"
+        }
+    } catch (Exception e) {
+        log.error "Frigate Parent App: Error setting snapshot URL for ${cameraName}: ${e.message}"
+    }
+}
 
 def getCameraStats(String cameraName) {
     log.info "Frigate Parent App: Requesting stats for camera: ${cameraName}"
