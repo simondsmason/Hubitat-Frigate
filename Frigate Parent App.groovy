@@ -21,10 +21,14 @@
  * 1.11 - 2025-11-21 - PERFORMANCE: Removed automatic camera discovery (scheduled every 60s) and MQTT stats discovery to eliminate excessive logging (~900 logs/hour). Added manual "Refresh Cameras" button for on-demand discovery. Reduced log verbosity: moved routine logs to debug level, removed "Device already exists" info logs, conditional discovery logging only when cameras change. Reduces log volume by ~87-95% while maintaining functionality.
  * 1.12 - 2025-11-21 - FIX: Added unschedule("refreshStats") to updated() method to properly cancel old automatic discovery schedules when app is updated. CLEANUP: Added zone cleanup during camera refresh - extracts valid zones from Frigate config and removes obsolete zone devices that no longer exist in configuration. Prevents accumulation of orphaned zone devices over time.
  * 1.13 - 2025-11-22 - FIX: Fixed missing logs for "update" type events without labels. Added INFO-level logging for update events to ensure visibility. Added INFO-level logging for stats messages. Now all event types (new, update, end) generate logs at INFO level.
+ * 1.14 - 2026-01-18 - FEATURE: Proactive device creation - creates all camera and zone devices during HTTP refresh instead of waiting for MQTT triggers. FEATURE: Added automatic daily refresh schedule (once per day). FEATURE: Changed device deletion to renaming with "_REMOVED" suffix to preserve rules. FEATURE: Updated device naming to Title Case format - "Back Garden Camera" and "Back Garden Camera - Back Step" (removed "Frigate" prefix, only capitalize first letters).
+ * 1.15 - 2026-01-18 - FEATURE: Automatic camera refresh after installation and configuration updates - cameras are automatically discovered after initial setup or when passwords/credentials are updated, eliminating the need to manually click refresh.
+ * 1.16 - 2026-01-18 - PERFORMANCE: Moved routine refresh logs to debug level - "Refreshing stats and config", "Camera has motion detection enabled", and "Camera list unchanged" now only log at debug level. Reduces log volume when debug logging is disabled, addressing excessive logging concerns.
+ * 1.17 - 2026-01-18 - ARCHITECTURE: Removed all MQTT event logging from Parent App. MQTT event logging (motion started, event processed, motion ended) is now handled entirely by MQTT Bridge Device when device debug is enabled. This improves separation of concerns and reduces Parent App log volume during active motion periods.
  * 
  * @author Simon Mason
- * @version 1.13
- * @date 2025-11-22
+ * @version 1.17
+ * @date 2026-01-18
  */
 
 private boolean zonesEnabled() {
@@ -60,7 +64,10 @@ private String normalizeUrl(def urlValue) {
 }
 
 private String buildEventSnapshotUrl(String eventId) {
-    return eventId ? "http://${frigateServer}:${frigatePort}/api/events/${eventId}/snapshot.jpg?bbox=1&timestamp=1" : null
+    // Frigate requires literal & as parameter separator, but Hubitat corrupts & to × when storing
+    // Solution: Use URL encoding for the entire query string, or omit parameters if optional
+    // Testing without query parameters first - if bbox/timestamp are needed, we'll need a different approach
+    return eventId ? "http://${frigateServer}:${frigatePort}/api/events/${eventId}/snapshot.jpg" : null
 }
 
 private String buildSnapshotUrl(String eventId, def snapshotField) {
@@ -272,7 +279,7 @@ private Map extractEventFields(String jsonString) {
     } catch (Exception e) {
         // If regex extraction fails, return empty map - caller should fallback to full parse
         if (debugLogging) {
-            log.debug "Frigate Parent App: Regex extraction failed, will fallback to full parse: ${e.message} (v1.13)"
+            log.debug "Frigate Parent App: Regex extraction failed, will fallback to full parse: ${e.message} (v${appVersion()})"
         }
     }
     
@@ -328,6 +335,13 @@ private String prettifyZoneName(String zoneName) {
         return ""
     }
     return zoneName.split(/[_\s-]+/).collect { it.capitalize() }.join(" ")
+}
+
+private String prettifyCameraName(String cameraName) {
+    if (!cameraName) {
+        return ""
+    }
+    return cameraName.split(/[_\s-]+/).collect { it.capitalize() }.join(" ")
 }
 
 private String buildZoneDeviceId(String cameraName, String zoneName) {
@@ -387,9 +401,9 @@ private def getOrCreateZoneDevice(String cameraName, String zoneName) {
         return existing
     }
     
-    def cameraTitle = cameraName.replace('_', ' ').toUpperCase()
+    def cameraTitle = prettifyCameraName(cameraName)
     def zoneTitle = prettifyZoneName(zoneName)
-    def label = "Frigate ${cameraTitle} - ${zoneTitle}"
+    def label = "${cameraTitle} Camera - ${zoneTitle}"
     try {
         def device = addChildDevice("simonmason", "Frigate Camera Device", zoneDeviceId, [
             name       : label,
@@ -402,11 +416,11 @@ private def getOrCreateZoneDevice(String cameraName, String zoneName) {
             device.updateDataValue("zoneName", zoneName)
             device.updateEventMetadata([cameraName: cameraName, zoneName: zoneName])
             state.zoneChildMap[zoneKey(cameraName, zoneName)] = zoneDeviceId
-            log.info "Frigate Parent App: Created zone device ${label} (v1.13)"
+            log.info "Frigate Parent App: Created zone device ${label} (v${appVersion()})"
         }
         return device
     } catch (Exception e) {
-        log.error "Frigate Parent App: Failed to create zone device for ${cameraName}/${zoneName}: ${e.message} (v1.13)"
+            log.error "Frigate Parent App: Failed to create zone device for ${cameraName}/${zoneName}: ${e.message} (v${appVersion()})"
         return null
     }
 }
@@ -481,6 +495,12 @@ definition(
     importUrl: ""
 )
 
+/**
+ * Returns the current app version number
+ * This is used in all log statements to ensure version consistency
+ */
+String appVersion() { return "1.17" }
+
 preferences {
     page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
         section("MQTT Connection") {
@@ -512,7 +532,7 @@ preferences {
         }
         
         section("Version") {
-            paragraph "Version 1.13"
+            paragraph "Version ${appVersion()}"
         }
     }
     
@@ -532,18 +552,23 @@ preferences {
 }
 
 def installed() {
-    log.info "Frigate Parent App: Installing app (v1.13)"
+    log.info "Frigate Parent App: Installing app (v${appVersion()})"
     initialize()
+    // Automatically refresh cameras after initial installation
+    // Delay to allow MQTT bridge to initialize first
+    runIn(5, "refreshCameras")
 }
 
 def updated() {
-    log.info "Frigate Parent App: Updating app (v1.13)"
+    log.info "Frigate Parent App: Updating app (v${appVersion()})"
     unsubscribe()
     
     // CRITICAL: Cancel any scheduled refreshStats tasks from old versions
     // The old version had automatic discovery scheduled every 60 seconds
     // Must cancel before initialize() to ensure old schedule is stopped
     unschedule("refreshStats")
+    
+    // Schedule will be recreated in initialize() with daily schedule
 
     // Check if refresh cameras button was clicked
     if (settings.refreshCamerasButton) {
@@ -553,6 +578,11 @@ def updated() {
 
     // Initialize will reconfigure the MQTT bridge device with any updated settings (including password)
     initialize()
+    
+    // Automatically refresh cameras after configuration update
+    // This ensures new credentials are tested and cameras are discovered immediately
+    // Delay to allow MQTT bridge to reconnect with new credentials first
+    runIn(5, "refreshCameras")
 }
 
 def appButtonHandler(btn) {
@@ -562,7 +592,7 @@ def appButtonHandler(btn) {
 }
 
 def initialize() {
-    log.info "Frigate Parent App: Initializing (v1.13)"
+    log.info "Frigate Parent App: Initializing (v${appVersion()})"
     
     // Initialize state structures
     state.processedEventIds = state.processedEventIds ?: []
@@ -582,6 +612,10 @@ def initialize() {
     
     // Unschedule any existing refreshStats schedule (from previous versions)
     unschedule("refreshStats")
+    
+    // Schedule automatic daily refresh at 3 AM
+    schedule("0 0 3 * * ?", "refreshStats")
+    log.info "Frigate Parent App: Scheduled automatic daily refresh at 3 AM (v${appVersion()})"
 }
 
 // Create or update the MQTT bridge device
@@ -590,23 +624,23 @@ def createOrUpdateMQTTBridge() {
     def bridgeDevice = getChildDevice(bridgeDeviceId)
     
     if (!bridgeDevice) {
-        log.info "Frigate Parent App: Creating MQTT bridge device (v1.13)"
+        log.info "Frigate Parent App: Creating MQTT bridge device (v${appVersion()})"
         try {
             bridgeDevice = addChildDevice("simonmason", "Frigate MQTT Bridge Device", bridgeDeviceId, [
                 name: "Frigate MQTT Bridge",
                 label: "Frigate MQTT Bridge",
                 isComponent: false
             ])
-            log.info "Frigate Parent App: MQTT bridge device created (v1.13)"
+            log.info "Frigate Parent App: MQTT bridge device created (v${appVersion()})"
             
             // Update bridge device preferences
             runIn(2, "configureMQTTBridge")
             
         } catch (Exception e) {
-            log.error "Frigate Parent App: Failed to create MQTT bridge device: ${e.message} (v1.13)"
+            log.error "Frigate Parent App: Failed to create MQTT bridge device: ${e.message} (v${appVersion()})"
         }
     } else {
-        log.info "Frigate Parent App: MQTT bridge device already exists (v1.13)"
+        log.info "Frigate Parent App: MQTT bridge device already exists (v${appVersion()})"
         // Update preferences if they changed
         configureMQTTBridge()
     }
@@ -615,11 +649,11 @@ def createOrUpdateMQTTBridge() {
 def configureMQTTBridge() {
     def bridgeDevice = getChildDevice("frigate_mqtt_bridge")
     if (!bridgeDevice) {
-        log.error "Frigate Parent App: Bridge device not found for configuration (v1.13)"
+        log.error "Frigate Parent App: Bridge device not found for configuration (v${appVersion()})"
         return
     }
     
-    log.info "Frigate Parent App: Configuring MQTT bridge device with MQTT settings (v1.13)"
+    log.info "Frigate Parent App: Configuring MQTT bridge device with MQTT settings (v${appVersion()})"
     
     // Send configuration to bridge device via configure command
     try {
@@ -630,16 +664,16 @@ def configureMQTTBridge() {
             mqttPassword ?: "",
             topicPrefix ?: "frigate"
         )
-            log.info "Frigate Parent App: MQTT bridge device configured successfully (v1.13)"
+            log.info "Frigate Parent App: MQTT bridge device configured successfully (v${appVersion()})"
         } catch (Exception e) {
-            log.error "Frigate Parent App: Failed to configure bridge device: ${e.message} (v1.13)"
+            log.error "Frigate Parent App: Failed to configure bridge device: ${e.message} (v${appVersion()})"
     }
 }
 
 def ensureBridgeConnected() {
     def bridgeDevice = getChildDevice("frigate_mqtt_bridge")
     if (!bridgeDevice) {
-        log.warn "Frigate Parent App: MQTT bridge device not found when attempting to ensure connection (v1.13)"
+        log.warn "Frigate Parent App: MQTT bridge device not found when attempting to ensure connection (v${appVersion()})"
         return
     }
     try {
@@ -649,16 +683,16 @@ def ensureBridgeConnected() {
             bridgeDevice.connect()
         }
     } catch (Exception e) {
-        log.error "Frigate Parent App: Error ensuring bridge connectivity: ${e.message} (v1.13)"
+        log.error "Frigate Parent App: Error ensuring bridge connectivity: ${e.message} (v${appVersion()})"
     }
 }
 
 def handleStatsMessage(String message) {
     if (debugLogging) {
-        log.debug "Frigate Parent App: Received stats message (camera discovery disabled - use manual refresh button) (v1.13)"
+        log.debug "Frigate Parent App: Received stats message (camera discovery disabled - use manual refresh button) (v${appVersion()})"
     } else {
         // Log at info level that stats were received (but discovery is disabled)
-        log.info "Frigate Parent App: Received stats message (camera discovery disabled - use manual refresh button) (v1.13)"
+        log.info "Frigate Parent App: Received stats message (camera discovery disabled - use manual refresh button) (v${appVersion()})"
     }
     
     // Camera discovery removed from MQTT stats - use manual refresh button instead
@@ -667,11 +701,8 @@ def handleStatsMessage(String message) {
 }
 
 def handleEventMessage(String message) {
-    // Always log function entry at info level (with minimal detail to avoid log spam)
-    if (debugLogging) {
-        log.debug "Frigate Parent App: handleEventMessage() called with payload size: ${message?.size() ?: 0} bytes (v1.13)"
-    }
-    
+    // MQTT event logging is now handled by MQTT Bridge Device when device debug is enabled
+    // Parent App focuses on business logic and state management, not MQTT transport details
     ensureStateMaps()
     try {
         // Use selective field extraction to avoid parsing 60KB+ payloads including unused path_data
@@ -681,7 +712,7 @@ def handleEventMessage(String message) {
         def parsedEvent = null
         if (!fields.camera && !fields.id) {
             if (debugLogging) {
-                log.debug "Frigate Parent App: Regex extraction failed, falling back to full JSON parse (v1.13)"
+                log.debug "Frigate Parent App: Regex extraction failed, falling back to full JSON parse (v${appVersion()})"
             }
             try {
                 parsedEvent = new groovy.json.JsonSlurper().parseText(message)
@@ -707,7 +738,7 @@ def handleEventMessage(String message) {
                 fields.has_snapshot = (eventPayload.has_snapshot == true)
                 fields.has_clip = (eventPayload.has_clip == true)
             } catch (Exception parseEx) {
-                log.error "Frigate Parent App: Both regex extraction and JSON parse failed: ${parseEx.message} (v1.13)"
+                log.error "Frigate Parent App: Both regex extraction and JSON parse failed: ${parseEx.message} (v${appVersion()})"
                 return
             }
         }
@@ -717,9 +748,9 @@ def handleEventMessage(String message) {
         def eventId = fields.id?.toString()
         
         if (!cameraName) {
-            log.warn "Frigate Parent App: Event has no camera name - cannot process (v1.13)"
+            log.warn "Frigate Parent App: Event has no camera name - cannot process (v${appVersion()})"
             if (debugLogging) {
-                log.debug "Frigate Parent App: Extracted fields: ${fields.keySet()} (v1.13)"
+                log.debug "Frigate Parent App: Extracted fields: ${fields.keySet()} (v${appVersion()})"
             }
             return
         }
@@ -727,14 +758,14 @@ def handleEventMessage(String message) {
         def deviceId = "frigate_${cameraName}"
         def childDevice = getChildDevice(deviceId)
         if (!childDevice) {
-            log.warn "Frigate Parent App: No child device found for camera: ${cameraName} (searched for device ID: ${deviceId}) (v1.13)"
+            log.warn "Frigate Parent App: No child device found for camera: ${cameraName} (searched for device ID: ${deviceId}) (v${appVersion()})"
             return
         }
         
         if (eventType == "new" && eventId) {
             if (state.processedEventIds.contains(eventId)) {
                 if (debugLogging) {
-                    log.debug "Frigate Parent App: Already processed NEW event ${eventId} for camera ${cameraName} (v1.13)"
+                    log.debug "Frigate Parent App: Already processed NEW event ${eventId} for camera ${cameraName} (v${appVersion()})"
                 }
                 return
             }
@@ -818,25 +849,17 @@ def handleEventMessage(String message) {
         if (eventType == "end") {
             if (!cameraHasActiveEvents(cameraName)) {
                 childDevice.clearDetections()
-                if (eventId) {
-                    log.info "Frigate Parent App: Motion ended on ${cameraName} - Event ID: ${eventId} (v1.13)"
-                } else {
-                    log.info "Frigate Parent App: Motion ended on ${cameraName} (v1.13)"
-                }
+                // MQTT event logging is handled by MQTT Bridge Device when device debug is enabled
             } else if (debugLogging) {
-                log.debug "Frigate Parent App: Camera ${cameraName} still has active events after ending ${eventId} (v1.13)"
+                log.debug "Frigate Parent App: Camera ${cameraName} still has active events after ending ${eventId} (v${appVersion()})"
             }
         } else {
             childDevice.updateMotionState("active")
             if (label) {
                 childDevice.updateObjectDetection(label, score)
-                log.info "Frigate Parent App: Event processed - ${cameraName}: ${label} (${score}) - Event ID: ${eventId} (v1.13)"
-            } else if (eventType == "new") {
-                log.info "Frigate Parent App: Motion started on ${cameraName} - Event ID: ${eventId} (v1.13)"
-            } else {
-                // Log update events even without labels to ensure visibility
-                log.info "Frigate Parent App: Event update processed - ${cameraName} - Event ID: ${eventId} (v1.13)"
+                // MQTT event logging is handled by MQTT Bridge Device when device debug is enabled
             }
+            // MQTT event logging is handled by MQTT Bridge Device when device debug is enabled
         }
         
         if (zonesEnabled() && eventId) {
@@ -846,20 +869,20 @@ def handleEventMessage(String message) {
         }
         
     } catch (Exception e) {
-        log.error "Frigate Parent App: Error parsing event message: ${e.message} (v1.13)"
+        log.error "Frigate Parent App: Error parsing event message: ${e.message} (v${appVersion()})"
         // Extract only camera/eventId for error context, don't log full 60KB+ payload
         try {
             def cameraMatch = message =~ /"camera"\s*:\s*"([^"]+)"/
             def idMatch = message =~ /"id"\s*:\s*"([^"]+)"/
             def camera = cameraMatch ? cameraMatch[0][1] : "unknown"
             def eventId = idMatch ? idMatch[0][1] : "unknown"
-            log.error "Frigate Parent App: Event camera: ${camera}, eventId: ${eventId}, payload size: ${message?.size() ?: 0} bytes (v1.13)"
+            log.error "Frigate Parent App: Event camera: ${camera}, eventId: ${eventId}, payload size: ${message?.size() ?: 0} bytes (v${appVersion()})"
         } catch (Exception ignored) {
-            log.error "Frigate Parent App: Could not extract error context (v1.13)"
+            log.error "Frigate Parent App: Could not extract error context (v${appVersion()})"
         }
-        log.error "Frigate Parent App: Stack trace: ${e.stackTrace} (v1.13)"
+        log.error "Frigate Parent App: Stack trace: ${e.stackTrace} (v${appVersion()})"
         if (debugLogging) {
-            log.debug "Frigate Parent App: Exception class: ${e.class.name} (v1.13)"
+            log.debug "Frigate Parent App: Exception class: ${e.class.name} (v${appVersion()})"
         }
     }
 }
@@ -869,37 +892,39 @@ def createOrUpdateCameraDevice(String cameraName) {
     def childDevice = getChildDevice(deviceId)
     
     if (!childDevice) {
-        log.info "Frigate Parent App: Processing camera: ${cameraName} (ID: ${deviceId}) (v1.13)"
-        log.info "Frigate Parent App: Creating new device for camera: ${cameraName} (v1.13)"
-        log.info "Frigate Parent App: Device ID: ${deviceId} (v1.13)"
-        log.info "Frigate Parent App: Device name: Frigate ${cameraName.replace('_', ' ').toUpperCase()} (v1.13)"
+        def cameraTitle = prettifyCameraName(cameraName)
+        def deviceLabel = "${cameraTitle} Camera"
+        log.info "Frigate Parent App: Processing camera: ${cameraName} (ID: ${deviceId}) (v${appVersion()})"
+        log.info "Frigate Parent App: Creating new device for camera: ${cameraName} (v${appVersion()})"
+        log.info "Frigate Parent App: Device ID: ${deviceId} (v${appVersion()})"
+        log.info "Frigate Parent App: Device name: ${deviceLabel} (v${appVersion()})"
         
         try {
-            log.info "Frigate Parent App: Attempting to create device... (v1.13)"
+            log.info "Frigate Parent App: Attempting to create device... (v${appVersion()})"
             addChildDevice("simonmason", "Frigate Camera Device", deviceId, [
-                name: "Frigate ${cameraName.replace('_', ' ').toUpperCase()}",
-                label: "Frigate ${cameraName.replace('_', ' ').toUpperCase()}",
+                name: deviceLabel,
+                label: deviceLabel,
                 isComponent: false
             ])
             
-            log.info "Frigate Parent App: Device creation command sent for ${cameraName} (v1.13)"
+            log.info "Frigate Parent App: Device creation command sent for ${cameraName} (v${appVersion()})"
             
             // Verify the device was actually created
             def verifyDevice = getChildDevice(deviceId)
             if (verifyDevice) {
-                log.info "Frigate Parent App: SUCCESS - Device created for ${cameraName} (v1.13)"
+                log.info "Frigate Parent App: SUCCESS - Device created for ${cameraName} (v${appVersion()})"
             } else {
-                log.error "Frigate Parent App: FAILED - Device not found after creation attempt for ${cameraName} (v1.13)"
+                log.error "Frigate Parent App: FAILED - Device not found after creation attempt for ${cameraName} (v${appVersion()})"
             }
             
         } catch (Exception e) {
-            log.error "Frigate Parent App: Exception creating device for ${cameraName}: ${e.message} (v1.13)"
-            log.error "Frigate Parent App: Exception details: ${e.toString()} (v1.13)"
+            log.error "Frigate Parent App: Exception creating device for ${cameraName}: ${e.message} (v${appVersion()})"
+            log.error "Frigate Parent App: Exception details: ${e.toString()} (v${appVersion()})"
         }
     } else {
         // Device already exists - no logging needed to reduce log noise
         if (debugLogging) {
-            log.debug "Frigate Parent App: Device already exists for camera: ${cameraName} (v1.13)"
+            log.debug "Frigate Parent App: Device already exists for camera: ${cameraName} (v${appVersion()})"
         }
     }
 }
@@ -922,22 +947,30 @@ def removeObsoleteCameraDevices(List currentCameras) {
         def zoneIndex = remainder.indexOf("_zone_")
         if (zoneIndex > -1) {
             // Zone devices are handled by removeObsoleteZoneDevices()
-            // Only remove if camera itself is obsolete
+            // Only rename if camera itself is obsolete
             def cameraName = remainder.substring(0, zoneIndex)
             if (!currentCameras.contains(cameraName)) {
-                log.info "Frigate Parent App: Removing obsolete zone device ${dni} (camera removed) (v1.13)"
+                def currentLabel = device.label ?: device.name
+                if (!currentLabel.endsWith("_REMOVED")) {
+                    def newLabel = "${currentLabel}_REMOVED"
+                    device.setLabel(newLabel)
+                    log.info "Frigate Parent App: Renamed obsolete zone device ${dni} to ${newLabel} (camera removed) (v${appVersion()})"
+                }
                 if (state.activeZoneEvents) {
                     state.activeZoneEvents = state.activeZoneEvents.findAll { key, value -> !key.startsWith("${cameraName}__") }
                 }
                 if (state.zoneChildMap) {
                     state.zoneChildMap = state.zoneChildMap.findAll { entry -> entry.value != dni }
                 }
-                deleteChildDevice(dni)
             }
         } else if (!currentCameras.contains(remainder)) {
-            log.info "Frigate Parent App: Removing obsolete device for camera: ${remainder} (v1.13)"
+            def currentLabel = device.label ?: device.name
+            if (!currentLabel.endsWith("_REMOVED")) {
+                def newLabel = "${currentLabel}_REMOVED"
+                device.setLabel(newLabel)
+                log.info "Frigate Parent App: Renamed obsolete camera device ${dni} to ${newLabel} (v${appVersion()})"
+            }
             state.activeCameraEvents?.remove(remainder)
-            deleteChildDevice(dni)
         }
     }
 }
@@ -982,12 +1015,18 @@ def removeObsoleteZoneDevices(List currentCameras, Map validZonesPerCamera) {
         // Check if this zone device ID matches any valid zone
         def zoneMatches = validZoneIds.contains(zoneIdPart)
         
-        // If zone doesn't match any valid zone, remove it
+        // If zone doesn't match any valid zone, rename it
         if (!zoneMatches) {
             // Try to get the original zone name from device data, otherwise use the ID part
             def zoneName = device.getDataValue("zoneName") ?: zoneIdPart.replace('_', ' ')
             
-            log.info "Frigate Parent App: Removing obsolete zone device ${dni} (zone '${zoneName}' no longer exists for camera '${cameraName}') (v1.13)"
+            def currentLabel = device.label ?: device.name
+            if (!currentLabel.endsWith("_REMOVED")) {
+                def newLabel = "${currentLabel}_REMOVED"
+                device.setLabel(newLabel)
+                log.info "Frigate Parent App: Renamed obsolete zone device ${dni} to ${newLabel} (zone '${zoneName}' no longer exists for camera '${cameraName}') (v${appVersion()})"
+                removedCount++
+            }
             
             // Clean up state maps using the zone key format
             def zKey = zoneKey(cameraName, zoneName)
@@ -1009,19 +1048,16 @@ def removeObsoleteZoneDevices(List currentCameras, Map validZonesPerCamera) {
                     }
                 }
             }
-            
-            deleteChildDevice(dni)
-            removedCount++
         }
     }
     
     if (removedCount > 0) {
-        log.info "Frigate Parent App: Removed ${removedCount} obsolete zone device(s) (v1.13)"
+        log.info "Frigate Parent App: Renamed ${removedCount} obsolete zone device(s) with _REMOVED suffix (v${appVersion()})"
     }
 }
 
 def refreshCameras() {
-    log.info "Frigate Parent App: Manual camera refresh requested (v1.13)"
+    log.info "Frigate Parent App: Manual camera refresh requested (v${appVersion()})"
     
     // Set status to "checking"
     state.refreshStatus = "Checking cameras from Frigate..."
@@ -1032,7 +1068,9 @@ def refreshCameras() {
 
 
 def refreshStats() {
-    log.info "Frigate Parent App: Refreshing stats and config (v1.13)"
+    if (debugLogging) {
+        log.debug "Frigate Parent App: Refreshing stats and config (v${appVersion()})"
+    }
     
     try {
         // Prepare authentication headers
@@ -1057,20 +1095,22 @@ def refreshStats() {
                     config.cameras.each { cameraName, cameraConfig ->
                         if (cameraConfig.motion && cameraConfig.motion.enabled) {
                             camerasWithMotion.add(cameraName)
-                            log.info "Frigate Parent App: Camera ${cameraName} has motion detection enabled (v1.13)"
+                            if (debugLogging) {
+                                log.debug "Frigate Parent App: Camera ${cameraName} has motion detection enabled (v${appVersion()})"
+                            }
                             
                             // Extract valid zones for this camera from config
                             def validZones = []
                             if (cameraConfig.zones && cameraConfig.zones instanceof Map) {
                                 validZones = cameraConfig.zones.keySet() as List
                                 if (debugLogging && validZones) {
-                                    log.debug "Frigate Parent App: Camera ${cameraName} has zones: ${validZones} (v1.13)"
+                                    log.debug "Frigate Parent App: Camera ${cameraName} has zones: ${validZones} (v${appVersion()})"
                                 }
                             }
                             validZonesPerCamera[cameraName] = validZones
                         } else {
                             if (debugLogging) {
-                                log.debug "Frigate Parent App: Camera ${cameraName} has motion detection disabled (v1.13)"
+                                log.debug "Frigate Parent App: Camera ${cameraName} has motion detection disabled (v${appVersion()})"
                             }
                         }
                     }
@@ -1082,10 +1122,12 @@ def refreshStats() {
                     def camerasChanged = (currentCameraList != previousCameraList)
                     
                     if (camerasChanged) {
-                        log.info "Frigate Parent App: Discovered cameras: ${camerasWithMotion} (${camerasWithMotion.size()} with motion detection) (v1.13)"
+                        log.info "Frigate Parent App: Discovered cameras: ${camerasWithMotion} (${camerasWithMotion.size()} with motion detection) (v${appVersion()})"
                         state.lastDiscoveredCameras = camerasWithMotion
                     } else {
-                        log.info "Frigate Parent App: Camera list unchanged: ${camerasWithMotion.size()} cameras with motion detection (v1.13)"
+                        if (debugLogging) {
+                            log.debug "Frigate Parent App: Camera list unchanged: ${camerasWithMotion.size()} cameras with motion detection (v${appVersion()})"
+                        }
                     }
                     
                     // Create devices only for cameras with motion detection
@@ -1093,10 +1135,20 @@ def refreshStats() {
                         createOrUpdateCameraDevice(cameraName)
                     }
                     
-                    // Remove devices for cameras that no longer have motion detection
+                    // Proactively create zone devices for all valid zones
+                    if (zonesEnabled()) {
+                        camerasWithMotion.each { cameraName ->
+                            def validZones = validZonesPerCamera[cameraName] ?: []
+                            validZones.each { zoneName ->
+                                getOrCreateZoneDevice(cameraName, zoneName)
+                            }
+                        }
+                    }
+                    
+                    // Rename devices for cameras that no longer have motion detection
                     removeObsoleteCameraDevices(camerasWithMotion)
                     
-                    // Remove obsolete zone devices that don't match valid zones from config
+                    // Rename obsolete zone devices that don't match valid zones from config
                     if (zonesEnabled()) {
                         removeObsoleteZoneDevices(camerasWithMotion, validZonesPerCamera)
                     }
@@ -1115,7 +1167,7 @@ def refreshStats() {
                     state.refreshStatusColor = "red"
                 }
             } else {
-                log.error "Frigate Parent App: Failed to get config: ${configResponse.status} (v1.13)"
+                log.error "Frigate Parent App: Failed to get config: ${configResponse.status} (v${appVersion()})"
                 state.refreshStatus = "Error: Failed to connect to Frigate (HTTP ${configResponse.status})"
                 state.refreshStatusColor = "red"
             }
@@ -1127,15 +1179,15 @@ def refreshStats() {
             if (statsResponse.status == 200) {
                 def stats = statsResponse.data
                 if (debugLogging) {
-                    log.debug "Frigate Parent App: System stats - Detection FPS: ${stats.detection_fps}, GPU: ${stats.gpu_usages} (v1.13)"
+                    log.debug "Frigate Parent App: System stats - Detection FPS: ${stats.detection_fps}, GPU: ${stats.gpu_usages} (v${appVersion()})"
                 }
             } else {
-                log.error "Frigate Parent App: Failed to get stats: ${statsResponse.status} (v1.13)"
+                log.error "Frigate Parent App: Failed to get stats: ${statsResponse.status} (v${appVersion()})"
             }
         }
         
     } catch (Exception e) {
-        log.error "Frigate Parent App: Error getting config/stats: ${e.message} (v1.13)"
+        log.error "Frigate Parent App: Error getting config/stats: ${e.message} (v${appVersion()})"
         state.refreshStatus = "Error: ${e.message}"
         state.refreshStatusColor = "red"
     }
@@ -1145,7 +1197,7 @@ def refreshStats() {
 // These have been replaced with native MQTT via interfaces.mqtt
 
 def getCameraSnapshot(String cameraName) {
-    log.info "Frigate Parent App: Setting snapshot URL for camera: ${cameraName} (v1.13)"
+    log.info "Frigate Parent App: Setting snapshot URL for camera: ${cameraName} (v${appVersion()})"
     try {
         def normalizedCamera = cameraName?.toString()?.replaceFirst(/^frigate_/, "")
         def url = "http://${frigateServer}:${frigatePort}/api/${normalizedCamera}/latest.jpg"
@@ -1154,17 +1206,17 @@ def getCameraSnapshot(String cameraName) {
         if (child) {
             // Store URL-only to avoid large base64 attributes
             child.updateLatestSnapshotUrl(url)
-            log.info "Frigate Parent App: Latest snapshot URL stored on device ${child.label} (v1.13)"
+            log.info "Frigate Parent App: Latest snapshot URL stored on device ${child.label} (v${appVersion()})"
         } else {
-            log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot URL (v1.13)"
+            log.warn "Frigate Parent App: Child device not found for camera ${normalizedCamera} when storing snapshot URL (v${appVersion()})"
         }
     } catch (Exception e) {
-        log.error "Frigate Parent App: Error setting snapshot URL for ${cameraName}: ${e.message} (v1.13)"
+        log.error "Frigate Parent App: Error setting snapshot URL for ${cameraName}: ${e.message} (v${appVersion()})"
     }
 }
 
 def getCameraStats(String cameraName) {
-    log.info "Frigate Parent App: Requesting stats for camera: ${cameraName} (v1.13)"
+    log.info "Frigate Parent App: Requesting stats for camera: ${cameraName} (v${appVersion()})"
     
     try {
         def headers = [:]
@@ -1176,20 +1228,20 @@ def getCameraStats(String cameraName) {
         def url = "http://${frigateServer}:${frigatePort}/api/stats"
         httpGet([uri: url, headers: headers]) { response ->
             if (response.status == 200) {
-                log.info "Frigate Parent App: Stats retrieved (v1.13)"
+                log.info "Frigate Parent App: Stats retrieved (v${appVersion()})"
                 // Handle stats data here
             } else {
-                log.error "Frigate Parent App: Failed to get stats: ${response.status} (v1.13)"
+                log.error "Frigate Parent App: Failed to get stats: ${response.status} (v${appVersion()})"
             }
         }
     } catch (Exception e) {
-        log.error "Frigate Parent App: Error getting stats: ${e.message} (v1.13)"
+        log.error "Frigate Parent App: Error getting stats: ${e.message} (v${appVersion()})"
     }
 }
 
 // Cleanup methods
 def uninstalled() {
-    log.info "Frigate Parent App: Uninstalling app (v1.13)"
+    log.info "Frigate Parent App: Uninstalling app (v${appVersion()})"
     
     // Disconnect MQTT bridge device
     def bridgeDevice = getChildDevice("frigate_mqtt_bridge")
@@ -1197,7 +1249,7 @@ def uninstalled() {
         try {
             bridgeDevice.disconnect()
         } catch (Exception e) {
-            log.error "Frigate Parent App: Error disconnecting bridge device: ${e.message} (v1.13)"
+            log.error "Frigate Parent App: Error disconnecting bridge device: ${e.message} (v${appVersion()})"
         }
     }
     
