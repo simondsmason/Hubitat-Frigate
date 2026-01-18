@@ -13,10 +13,11 @@
  * 1.02 - 2025-11-07 - Added Initialize capability and automatic reconnection on hub start; connection health check
  * 1.03 - 2025-11-14 - PERFORMANCE: Removed full JSON parsing for event summary logging; now uses regex to extract only type/camera/id fields. Eliminates double parsing of 60KB+ payloads.
  * 1.04 - 2025-11-14 - SECURITY: Moved MQTT password from state variables to dataValue to prevent password exposure in device state display
+ * 1.05 - 2025-11-16 - Added has_snapshot field to event summary logging for snapshot tracking
  *
  * @author Simon Mason
- * @version 1.04
- * @date 2025-11-14
+ * @version 1.05
+ * @date 2025-11-16
  */
 
 metadata {
@@ -52,22 +53,22 @@ preferences {
 }
 
 def installed() {
-    log.info "Frigate MQTT Bridge: Device installed"
+    log.info "Frigate MQTT Bridge: Device installed (v1.05)"
     sendEvent(name: "connectionStatus", value: "disconnected")
-    sendEvent(name: "version", value: "1.04")
+    sendEvent(name: "version", value: "1.05")
     // Wait briefly for parent to send configuration, then initialise
     runIn(2, "initialize")
 }
 
 def updated() {
-    log.info "Frigate MQTT Bridge: Device updated"
+    log.info "Frigate MQTT Bridge: Device updated (v1.05)"
     unschedule()
     disconnect()
     initialize()
 }
 
 def initialize() {
-    log.info "Frigate MQTT Bridge: Initializing"
+    log.info "Frigate MQTT Bridge: Initializing (v1.05)"
     unschedule()
     runEvery5Minutes("ensureConnected")
     // Migrate password from state to dataValue if it exists in state (one-time migration)
@@ -78,12 +79,12 @@ def initialize() {
     if (state.mqttBroker) {
         connect()
     } else {
-        log.info "Frigate MQTT Bridge: Awaiting configuration from parent before connecting"
+        log.info "Frigate MQTT Bridge: Awaiting configuration from parent before connecting (v1.05)"
     }
 }
 
 def configure(String broker, Number port, String username, String password, String topicPrefix) {
-    log.info "Frigate MQTT Bridge: Configuration received from parent app"
+    log.info "Frigate MQTT Bridge: Configuration received from parent app (v1.05)"
     
     // Store configuration in device state (non-sensitive data)
     state.mqttBroker = broker
@@ -103,7 +104,7 @@ private Boolean isDebug() { return (settings?.debugLogging == true) }
 def connect() {
     if (state.connecting == true) {
         if (isDebug()) {
-            log.debug "Frigate MQTT Bridge: Connection attempt already in progress"
+            log.debug "Frigate MQTT Bridge: Connection attempt already in progress (v1.05)"
         }
         return
     }
@@ -118,12 +119,12 @@ def connect() {
     def debugLogging = isDebug()
     
     if (!broker) {
-        log.error "Frigate MQTT Bridge: No broker configured. Waiting for parent app to configure."
+        log.error "Frigate MQTT Bridge: No broker configured. Waiting for parent app to configure. (v1.05)"
         sendEvent(name: "connectionStatus", value: "not configured")
         return
     }
     
-    log.info "Frigate MQTT Bridge: Connecting to MQTT broker ${broker}:${port}"
+    log.info "Frigate MQTT Bridge: Connecting to MQTT broker ${broker}:${port} (v1.05)"
     sendEvent(name: "connectionStatus", value: "connecting")
     state.connecting = true
     
@@ -132,7 +133,7 @@ def connect() {
         if (interfaces.mqtt.isConnected()) {
             interfaces.mqtt.disconnect()
             if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Disconnected existing connection"
+                log.debug "Frigate MQTT Bridge: Disconnected existing connection (v1.05)"
             }
         }
         
@@ -146,9 +147,9 @@ def connect() {
         state.topicPrefix = topicPrefix
         
         if (debugLogging) {
-            log.debug "Frigate MQTT Bridge: MQTT URI: ${mqttUri}"
-            log.debug "Frigate MQTT Bridge: Client ID: ${clientId}"
-            log.debug "Frigate MQTT Bridge: Topic Prefix: ${topicPrefix}"
+            log.debug "Frigate MQTT Bridge: MQTT URI: ${mqttUri} (v1.05)"
+            log.debug "Frigate MQTT Bridge: Client ID: ${clientId} (v1.05)"
+            log.debug "Frigate MQTT Bridge: Topic Prefix: ${topicPrefix} (v1.05)"
         }
         
         // Connect to MQTT broker
@@ -158,7 +159,7 @@ def connect() {
         runIn(2, "subscribeToTopics")
         
     } catch (Exception e) {
-        log.error "Frigate MQTT Bridge: Failed to connect: ${e.message}"
+        log.error "Frigate MQTT Bridge: Failed to connect: ${e.message} (v1.05)"
         sendEvent(name: "connectionStatus", value: "error")
         state.connecting = false
         state.lastError = e.message
@@ -166,7 +167,7 @@ def connect() {
 }
 
 def disconnect() {
-    log.info "Frigate MQTT Bridge: Disconnecting from MQTT"
+    log.info "Frigate MQTT Bridge: Disconnecting from MQTT (v1.05)"
     try {
         if (interfaces.mqtt.isConnected()) {
             interfaces.mqtt.disconnect()
@@ -174,7 +175,7 @@ def disconnect() {
         sendEvent(name: "connectionStatus", value: "disconnected")
         state.connecting = false
     } catch (Exception e) {
-        log.error "Frigate MQTT Bridge: Error disconnecting: ${e.message}"
+        log.error "Frigate MQTT Bridge: Error disconnecting: ${e.message} (v1.05)"
         state.lastError = e.message
     }
 }
@@ -186,14 +187,14 @@ def ensureConnected() {
     }
 
     if (!interfaces.mqtt.isConnected() && state.connecting != true) {
-        log.warn "Frigate MQTT Bridge: MQTT connection lost, attempting to reconnect"
+        log.warn "Frigate MQTT Bridge: MQTT connection lost, attempting to reconnect (v1.05)"
         connect()
     }
 }
 
 def subscribeToTopics() {
     if (!interfaces.mqtt.isConnected()) {
-        log.error "Frigate MQTT Bridge: Not connected, attempting reconnect"
+        log.error "Frigate MQTT Bridge: Not connected, attempting reconnect (v1.05)"
         state.connecting = false
         runIn(5, "connect")
         return
@@ -206,20 +207,20 @@ def subscribeToTopics() {
         // Subscribe to Frigate stats for camera discovery
         def statsTopic = "${topicPrefix}/stats"
         interfaces.mqtt.subscribe(statsTopic, 1)
-        log.info "Frigate MQTT Bridge: Subscribed to ${statsTopic}"
+        log.info "Frigate MQTT Bridge: Subscribed to ${statsTopic} (v1.05)"
         
         // Subscribe to Frigate events for motion detection
         def eventsTopic = "${topicPrefix}/events"
         interfaces.mqtt.subscribe(eventsTopic, 1)
-        log.info "Frigate MQTT Bridge: Subscribed to ${eventsTopic}"
+        log.info "Frigate MQTT Bridge: Subscribed to ${eventsTopic} (v1.05)"
         
         sendEvent(name: "connectionStatus", value: "connected")
-        log.info "Frigate MQTT Bridge: MQTT connection established and subscriptions active"
+        log.info "Frigate MQTT Bridge: MQTT connection established and subscriptions active (v1.05)"
         state.connecting = false
         state.lastError = null
         
     } catch (Exception e) {
-        log.error "Frigate MQTT Bridge: Failed to subscribe: ${e.message}"
+        log.error "Frigate MQTT Bridge: Failed to subscribe: ${e.message} (v1.05)"
         sendEvent(name: "connectionStatus", value: "error")
     }
 }
@@ -229,7 +230,7 @@ def parse(String message) {
     def debugLogging = isDebug()
     
     if (debugLogging) {
-        log.debug "Frigate MQTT Bridge: Received MQTT message"
+        log.debug "Frigate MQTT Bridge: Received MQTT message (v1.05)"
     }
     
     try {
@@ -239,7 +240,7 @@ def parse(String message) {
         def topicPrefix = state.topicPrefix ?: "frigate"
         
         if (debugLogging) {
-            log.debug "Frigate MQTT Bridge: Topic: ${topicPath}, Payload length: ${payload?.size() ?: 0}"
+            log.debug "Frigate MQTT Bridge: Topic: ${topicPath}, Payload length: ${payload?.size() ?: 0} (v1.05)"
         }
         
         sendEvent(name: "lastMessage", value: "${topicPath}: ${payload?.size() ?: 0} bytes")
@@ -247,13 +248,13 @@ def parse(String message) {
         // Forward message to parent app based on topic
         if (topicPath == "${topicPrefix}/stats") {
             if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Forwarding stats message to parent app"
+                log.debug "Frigate MQTT Bridge: Forwarding stats message to parent app (v1.05)"
             }
             // Call parent app method to handle stats
             parent?.handleStatsMessage(payload)
         } else if (topicPath == "${topicPrefix}/events") {
             if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Forwarding event message to parent app"
+                log.debug "Frigate MQTT Bridge: Forwarding event message to parent app (v1.05)"
             }
             // Extract concise summary using regex to avoid full JSON parsing of 60KB+ payloads
             try {
@@ -293,25 +294,28 @@ def parse(String message) {
                     evtId = idInRoot[0][1]
                 }
                 
+                // Extract has_snapshot
+                def hasSnapshot = payload.contains('"has_snapshot":true')
+                
                 if (debugLogging) {
-                    log.debug "Frigate MQTT Bridge: Event summary - type=${evtType}, camera=${cam}, id=${evtId} (${payload?.size() ?: 0} bytes)"
+                    log.debug "Frigate MQTT Bridge: Event summary - type=${evtType}, camera=${cam}, id=${evtId}, has_snapshot=${hasSnapshot} (${payload?.size() ?: 0} bytes) (v1.05)"
                 }
             } catch (Exception ex) {
                 if (debugLogging) {
-                    log.debug "Frigate MQTT Bridge: Event summary extraction error: ${ex.message}"
+                    log.debug "Frigate MQTT Bridge: Event summary extraction error: ${ex.message} (v1.05)"
                 }
             }
             // Call parent app method to handle events
             parent?.handleEventMessage(payload)
         } else {
             if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Unhandled topic: ${topicPath}"
+                log.debug "Frigate MQTT Bridge: Unhandled topic: ${topicPath} (v1.05)"
             }
         }
         
     } catch (Exception e) {
-        log.error "Frigate MQTT Bridge: Error parsing MQTT message: ${e.message}"
-        log.error "Frigate MQTT Bridge: Stack trace: ${e.stackTrace}"
+        log.error "Frigate MQTT Bridge: Error parsing MQTT message: ${e.message} (v1.05)"
+        log.error "Frigate MQTT Bridge: Stack trace: ${e.stackTrace} (v1.05)"
     }
 }
 
@@ -319,39 +323,39 @@ def parse(String message) {
 def mqttClientStatus(String message) {
     def debugLogging = isDebug()
     
-    log.info "Frigate MQTT Bridge: mqttClientStatus() called with: ${message}"
+    log.info "Frigate MQTT Bridge: mqttClientStatus() called with: ${message} (v1.05)"
     
     if (message.startsWith("Error:") || message.contains("failed") || message.contains("disconnected")) {
-        log.error "Frigate MQTT Bridge: MQTT Error: ${message}"
+        log.error "Frigate MQTT Bridge: MQTT Error: ${message} (v1.05)"
         sendEvent(name: "connectionStatus", value: "error")
         state.connecting = false
         state.lastError = message
         
         // Attempt to reconnect after a delay
-        log.info "Frigate MQTT Bridge: Attempting reconnect in 10 seconds"
+        log.info "Frigate MQTT Bridge: Attempting reconnect in 10 seconds (v1.05)"
         runIn(10, "connect")
         
     } else if (message.contains("connected") || message.contains("Connected")) {
-        log.info "Frigate MQTT Bridge: MQTT connection established via status callback"
+        log.info "Frigate MQTT Bridge: MQTT connection established via status callback (v1.05)"
         sendEvent(name: "connectionStatus", value: "connected")
         state.connecting = false
         state.lastError = null
         // Subscribe to topics after connection
         runIn(1, "subscribeToTopics")
     } else {
-        log.info "Frigate MQTT Bridge: MQTT status update: ${message}"
+        log.info "Frigate MQTT Bridge: MQTT status update: ${message} (v1.05)"
         if (debugLogging) {
-            log.debug "Frigate MQTT Bridge: Full status message: ${message}"
+            log.debug "Frigate MQTT Bridge: Full status message: ${message} (v1.05)"
         }
     }
 }
 
 def refresh() {
-    log.info "Frigate MQTT Bridge: Refresh requested"
+    log.info "Frigate MQTT Bridge: Refresh requested (v1.05)"
     if (interfaces.mqtt.isConnected()) {
-        log.info "Frigate MQTT Bridge: Currently connected"
+        log.info "Frigate MQTT Bridge: Currently connected (v1.05)"
     } else {
-        log.info "Frigate MQTT Bridge: Not connected, attempting to connect"
+        log.info "Frigate MQTT Bridge: Not connected, attempting to connect (v1.05)"
         connect()
     }
 }
