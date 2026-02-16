@@ -16,17 +16,19 @@
  * 1.05 - 2025-11-16 - Added has_snapshot field to event summary logging for snapshot tracking
  * 1.06 - 2026-01-18 - REFACTOR: Added driverVersion() function and updated all log statements to use version variable approach for consistency and easier maintenance.
  * 1.07 - 2026-01-18 - ARCHITECTURE: Moved all MQTT event logging from Parent App to MQTT Bridge Device. Device now logs motion events (started, ended, processed, updated) at INFO level when device debug is enabled. Improved separation of concerns - MQTT transport logging handled by device, business logic logging handled by app.
+ * 1.08 - 2026-01-18 - PERFORMANCE: Added message filtering to reduce hub load - only forward "update" events that contain zone changes (entered_zones or current_zones). This dramatically reduces message volume by filtering out snapshot improvements, score changes, and other non-zone updates while preserving motion start/end and zone state changes.
+ * 1.09 - 2026-02-16 - FIXES: Fixed update filter to check for non-empty zone arrays instead of field presence (previous filter was a no-op). Strip path_data from payloads before forwarding to prevent unbounded payload growth. Moved lastMessage event to only fire for event messages, not stats. Removed stats passthrough to parent app (parent discards them).
  *
  * @author Simon Mason
- * @version 1.07
- * @date 2026-01-18
+ * @version 1.09
+ * @date 2026-02-16
  */
 
 /**
  * Returns the current driver version number
  * This is used in all log statements to ensure version consistency
  */
-String driverVersion() { return "1.07" }
+String driverVersion() { return "1.09" }
 
 metadata {
     definition (
@@ -252,15 +254,15 @@ def parse(String message) {
             log.debug "Frigate MQTT Bridge: Topic: ${topicPath}, Payload length: ${payload?.size() ?: 0} (v${driverVersion()})"
         }
         
-        sendEvent(name: "lastMessage", value: "${topicPath}: ${payload?.size() ?: 0} bytes")
-        
+        // Only update lastMessage for event messages to reduce event queue churn
+        // Stats messages arrive every 60s and don't need to generate device events
+
         // Forward message to parent app based on topic
         if (topicPath == "${topicPrefix}/stats") {
+            // Stats are not forwarded to parent - parent doesn't use them
             if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Forwarding stats message to parent app (v${driverVersion()})"
+                log.debug "Frigate MQTT Bridge: Stats message received (${payload?.size() ?: 0} bytes), not forwarding (v${driverVersion()})"
             }
-            // Call parent app method to handle stats
-            parent?.handleStatsMessage(payload)
         } else if (topicPath == "${topicPrefix}/events") {
             if (debugLogging) {
                 log.debug "Frigate MQTT Bridge: Forwarding event message to parent app (v${driverVersion()})"
@@ -350,13 +352,38 @@ def parse(String message) {
                         log.debug "Frigate MQTT Bridge: Event summary - type=${evtType}, camera=${cam}, id=${evtId}, has_snapshot=${hasSnapshot} (${payload?.size() ?: 0} bytes) (v${driverVersion()})"
                     }
                 }
+                
+                // Filter "update" events - only forward if they contain non-empty zone arrays
+                // Frigate always includes entered_zones/current_zones fields, so check for actual content
+                // This reduces message volume by filtering out snapshot improvements, score changes, etc.
+                if (evtType == "update") {
+                    // Check for non-empty zone arrays (not just field presence)
+                    def hasNonEmptyZones = payload =~ /"(?:entered_zones|current_zones)"\s*:\s*\[\s*"[^"]/
+
+                    if (!hasNonEmptyZones) {
+                        if (debugLogging) {
+                            log.debug "Frigate MQTT Bridge: Filtered update event (empty zones) - camera=${cam}, id=${evtId} (v${driverVersion()})"
+                        }
+                        return  // Don't forward this message
+                    }
+                }
+
+                // Strip path_data arrays to reduce payload size (unused, grows unbounded with event duration)
+                def cleanPayload = payload.replaceAll(/"path_data"\s*:\s*\[[^\]]*\]/, '"path_data":[]')
+
+                // Update lastMessage only for event messages (not stats)
+                sendEvent(name: "lastMessage", value: "frigate/events: ${evtType} camera=${cam} (${cleanPayload?.size() ?: 0} bytes)")
+
+                // Forward "new" and "end" events unconditionally, and "update" events with zone data
+                parent?.handleEventMessage(cleanPayload)
             } catch (Exception ex) {
                 if (debugLogging) {
                     log.debug "Frigate MQTT Bridge: Event summary extraction error: ${ex.message} (v${driverVersion()})"
                 }
+                // On error, still try to forward to parent (safety net) with path_data stripped
+                def fallbackPayload = payload.replaceAll(/"path_data"\s*:\s*\[[^\]]*\]/, '"path_data":[]')
+                parent?.handleEventMessage(fallbackPayload)
             }
-            // Call parent app method to handle events
-            parent?.handleEventMessage(payload)
         } else {
             if (debugLogging) {
                 log.debug "Frigate MQTT Bridge: Unhandled topic: ${topicPath} (v${driverVersion()})"

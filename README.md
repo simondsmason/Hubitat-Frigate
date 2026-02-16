@@ -134,6 +134,8 @@ Then activate security mode
 
 ## Change History
 
+- **1.18** - 2026-02-16 - Parent App: CRITICAL FIX - Fixed zone name extraction bug where Groovy findAll() returned full match strings instead of capture groups, causing all zone names to be truncated to a single letter. Zone devices now receive correct names from Frigate.
+- **1.09** - 2026-02-16 - MQTT Bridge Device: FIXES - Fixed update filter to check for non-empty zone arrays (was a no-op). Strip path_data from payloads before forwarding to prevent unbounded growth. Reduced event churn by only updating lastMessage for events, not stats. Removed stats passthrough to parent app.
 - **1.17** - 2026-01-18 - Parent App: ARCHITECTURE - Removed all MQTT event logging from Parent App. MQTT event logging (motion started, event processed, motion ended) is now handled entirely by MQTT Bridge Device when device debug is enabled. This improves separation of concerns and reduces Parent App log volume during active motion periods.
 - **1.07** - 2026-01-18 - MQTT Bridge Device: ARCHITECTURE - Moved all MQTT event logging from Parent App to MQTT Bridge Device. Device now logs motion events (started, ended, processed, updated) at INFO level when device debug is enabled. Improved separation of concerns - MQTT transport logging handled by device, business logic logging handled by app.
 - **1.16** - 2026-01-18 - Parent App: PERFORMANCE - Moved routine refresh logs to debug level - "Refreshing stats and config", "Camera has motion detection enabled", and "Camera list unchanged" now only log at debug level. Reduces log volume when debug logging is disabled, addressing excessive logging concerns.

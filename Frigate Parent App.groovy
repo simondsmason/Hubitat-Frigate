@@ -25,11 +25,80 @@
  * 1.15 - 2026-01-18 - FEATURE: Automatic camera refresh after installation and configuration updates - cameras are automatically discovered after initial setup or when passwords/credentials are updated, eliminating the need to manually click refresh.
  * 1.16 - 2026-01-18 - PERFORMANCE: Moved routine refresh logs to debug level - "Refreshing stats and config", "Camera has motion detection enabled", and "Camera list unchanged" now only log at debug level. Reduces log volume when debug logging is disabled, addressing excessive logging concerns.
  * 1.17 - 2026-01-18 - ARCHITECTURE: Removed all MQTT event logging from Parent App. MQTT event logging (motion started, event processed, motion ended) is now handled entirely by MQTT Bridge Device when device debug is enabled. This improves separation of concerns and reduces Parent App log volume during active motion periods.
- * 
+ * 1.18 - 2026-02-16 - CRITICAL FIX: Fixed zone name extraction bug - Groovy findAll() returns full match strings, not capture groups. zoneMatch[1] was returning the second character of the match (e.g. "e" from "entire_frame_back_garden") instead of the zone name. All zone devices were receiving single-letter names. Fixed by stripping quotes from the full match string.
+ *
  * @author Simon Mason
- * @version 1.17
- * @date 2026-01-18
+ * @version 1.18
+ * @date 2026-02-16
  */
+
+definition(
+    name: "Frigate Parent App",
+    namespace: "simonmason",
+    author: "Simon Mason",
+    description: "Frigate NVR integration with automatic camera discovery",
+    category: "Safety & Security",
+    iconUrl: "",
+    iconX2Url: "",
+    iconX3Url: "",
+    importUrl: ""
+)
+
+/**
+ * Returns the current app version number
+ * This is used in all log statements to ensure version consistency
+ */
+String appVersion() { return "1.18" }
+
+preferences {
+    page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
+        section("MQTT Connection") {
+            input "mqttBroker", "text", title: "MQTT Broker IP", required: true
+            input "mqttPort", "number", title: "MQTT Port", required: true
+            input "mqttUsername", "text", title: "MQTT Username", required: true
+            input "mqttPassword", "password", title: "MQTT Password", required: true
+            input "topicPrefix", "text", title: "Frigate Topic Prefix", required: true
+        }
+        
+        section("Camera Discovery") {
+            paragraph "Click 'Refresh Cameras' button to discover cameras from Frigate. Cameras are not automatically discovered to reduce hub load."
+            href(name: "refreshCamerasPage", title: "Refresh Cameras", required: false, description: "Discover and create camera devices", page: "refreshCamerasPage")
+        }
+        
+        section("Zones & Metadata") {
+            input "enableZoneDevices", "bool", title: "Create zone child devices", required: true, defaultValue: true
+        }
+        
+        section("Frigate Server") {
+            input "frigateServer", "text", title: "Frigate Server IP", required: true
+            input "frigatePort", "number", title: "Frigate Port", required: true
+            input "frigateUsername", "text", title: "Frigate Username", required: true
+            input "frigatePassword", "password", title: "Frigate Password", required: true
+        }
+        
+        section("Debug") {
+            input "debugLogging", "bool", title: "Enable Debug Logging", required: true, defaultValue: false
+        }
+        
+        section("Version") {
+            paragraph "Version ${appVersion()}"
+        }
+    }
+    
+    page(name: "refreshCamerasPage", title: "Refresh Cameras", install: false, uninstall: false) {
+        section {
+            paragraph "Click the button below to discover cameras from Frigate and create/update camera devices."
+            input(name: "refreshCamerasButton", type: "button", title: "Refresh Cameras Now", submitOnChange: true)
+        }
+        section("Status") {
+            def status = state.refreshStatus ?: "Ready - Click 'Refresh Cameras Now' to discover cameras"
+            paragraph status
+        }
+        section {
+            href(name: "backToMain", title: "← Back to Configuration", required: false, description: "Return to main configuration", page: "mainPage")
+        }
+    }
+}
 
 private boolean zonesEnabled() {
     return (settings?.enableZoneDevices != false)
@@ -246,7 +315,7 @@ private Map extractEventFields(String jsonString) {
             if (zonesStr) {
                 def zoneList = []
                 zonesStr.findAll(/"([^"]+)"/).each { zoneMatch ->
-                    zoneList << zoneMatch[1]
+                    zoneList << zoneMatch.replaceAll('"', '')
                 }
                 if (zoneList) fields.current_zones = zoneList
             }
@@ -258,7 +327,7 @@ private Map extractEventFields(String jsonString) {
             if (zonesStr) {
                 def zoneList = []
                 zonesStr.findAll(/"([^"]+)"/).each { zoneMatch ->
-                    zoneList << zoneMatch[1]
+                    zoneList << zoneMatch.replaceAll('"', '')
                 }
                 if (zoneList) fields.entered_zones = zoneList
             }
@@ -270,7 +339,7 @@ private Map extractEventFields(String jsonString) {
             if (zonesStr) {
                 def zoneList = []
                 zonesStr.findAll(/"([^"]+)"/).each { zoneMatch ->
-                    zoneList << zoneMatch[1]
+                    zoneList << zoneMatch.replaceAll('"', '')
                 }
                 if (zoneList) fields.previous_zones = zoneList
             }
@@ -480,74 +549,6 @@ private void handleZoneEvents(String cameraName,
             zoneDevice.updateObjectDetection(label, score)
         }
         zoneDevice.updateMotionState("active")
-    }
-}
-
-definition(
-    name: "Frigate Parent App",
-    namespace: "simonmason",
-    author: "Simon Mason",
-    description: "Frigate NVR integration with automatic camera discovery",
-    category: "Safety & Security",
-    iconUrl: "",
-    iconX2Url: "",
-    iconX3Url: "",
-    importUrl: ""
-)
-
-/**
- * Returns the current app version number
- * This is used in all log statements to ensure version consistency
- */
-String appVersion() { return "1.17" }
-
-preferences {
-    page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
-        section("MQTT Connection") {
-            input "mqttBroker", "text", title: "MQTT Broker IP", required: true
-            input "mqttPort", "number", title: "MQTT Port", required: true
-            input "mqttUsername", "text", title: "MQTT Username", required: true
-            input "mqttPassword", "password", title: "MQTT Password", required: true
-            input "topicPrefix", "text", title: "Frigate Topic Prefix", required: true
-        }
-        
-        section("Camera Discovery") {
-            paragraph "Click 'Refresh Cameras' button to discover cameras from Frigate. Cameras are not automatically discovered to reduce hub load."
-            href(name: "refreshCamerasPage", title: "Refresh Cameras", required: false, description: "Discover and create camera devices", page: "refreshCamerasPage")
-        }
-        
-        section("Zones & Metadata") {
-            input "enableZoneDevices", "bool", title: "Create zone child devices", required: true, defaultValue: true
-        }
-        
-        section("Frigate Server") {
-            input "frigateServer", "text", title: "Frigate Server IP", required: true
-            input "frigatePort", "number", title: "Frigate Port", required: true
-            input "frigateUsername", "text", title: "Frigate Username", required: true
-            input "frigatePassword", "password", title: "Frigate Password", required: true
-        }
-        
-        section("Debug") {
-            input "debugLogging", "bool", title: "Enable Debug Logging", required: true, defaultValue: false
-        }
-        
-        section("Version") {
-            paragraph "Version ${appVersion()}"
-        }
-    }
-    
-    page(name: "refreshCamerasPage", title: "Refresh Cameras", install: false, uninstall: false) {
-        section {
-            paragraph "Click the button below to discover cameras from Frigate and create/update camera devices."
-            input(name: "refreshCamerasButton", type: "button", title: "Refresh Cameras Now", submitOnChange: true)
-        }
-        section("Status") {
-            def status = state.refreshStatus ?: "Ready - Click 'Refresh Cameras Now' to discover cameras"
-            paragraph status
-        }
-        section {
-            href(name: "backToMain", title: "← Back to Configuration", required: false, description: "Return to main configuration", page: "mainPage")
-        }
     }
 }
 
