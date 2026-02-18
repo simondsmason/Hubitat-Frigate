@@ -134,6 +134,8 @@ Then activate security mode
 
 ## Change History
 
+- **1.19** - 2026-02-17 - Parent App: PERFORMANCE - Added instant zone activation via per-zone MQTT topics. Frigate publishes lightweight integer counts to per-zone topics ~2-3s before zone data appears in the events stream. Zone devices now activate immediately on first detection, matching Home Assistant response times.
+- **1.10** - 2026-02-17 - MQTT Bridge Device: PERFORMANCE - Subscribe to per-zone MQTT topics (frigate/+/+) for instant zone activation. Forwards lightweight integer count messages to parent app for immediate zone device activation.
 - **1.18** - 2026-02-16 - Parent App: CRITICAL FIX - Fixed zone name extraction bug where Groovy findAll() returned full match strings instead of capture groups, causing all zone names to be truncated to a single letter. Zone devices now receive correct names from Frigate.
 - **1.09** - 2026-02-16 - MQTT Bridge Device: FIXES - Fixed update filter to check for non-empty zone arrays (was a no-op). Strip path_data from payloads before forwarding to prevent unbounded growth. Reduced event churn by only updating lastMessage for events, not stats. Removed stats passthrough to parent app.
 - **1.17** - 2026-01-18 - Parent App: ARCHITECTURE - Removed all MQTT event logging from Parent App. MQTT event logging (motion started, event processed, motion ended) is now handled entirely by MQTT Bridge Device when device debug is enabled. This improves separation of concerns and reduces Parent App log volume during active motion periods.

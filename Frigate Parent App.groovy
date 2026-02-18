@@ -26,10 +26,11 @@
  * 1.16 - 2026-01-18 - PERFORMANCE: Moved routine refresh logs to debug level - "Refreshing stats and config", "Camera has motion detection enabled", and "Camera list unchanged" now only log at debug level. Reduces log volume when debug logging is disabled, addressing excessive logging concerns.
  * 1.17 - 2026-01-18 - ARCHITECTURE: Removed all MQTT event logging from Parent App. MQTT event logging (motion started, event processed, motion ended) is now handled entirely by MQTT Bridge Device when device debug is enabled. This improves separation of concerns and reduces Parent App log volume during active motion periods.
  * 1.18 - 2026-02-16 - CRITICAL FIX: Fixed zone name extraction bug - Groovy findAll() returns full match strings, not capture groups. zoneMatch[1] was returning the second character of the match (e.g. "e" from "entire_frame_back_garden") instead of the zone name. All zone devices were receiving single-letter names. Fixed by stripping quotes from the full match string.
+ * 1.19 - 2026-02-17 - PERFORMANCE: Added handleZoneCountMessage() for instant zone activation via per-zone MQTT topics. Frigate publishes lightweight integer counts to per-zone topics ~2-3s before zone data appears in the events stream. Builds zoneToCameraMap during camera refresh for fast zone-to-camera lookups. Zone devices now activate immediately on first detection, matching Home Assistant response times.
  *
  * @author Simon Mason
- * @version 1.18
- * @date 2026-02-16
+ * @version 1.19
+ * @date 2026-02-17
  */
 
 definition(
@@ -48,7 +49,7 @@ definition(
  * Returns the current app version number
  * This is used in all log statements to ensure version consistency
  */
-String appVersion() { return "1.18" }
+String appVersion() { return "1.19" }
 
 preferences {
     page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
@@ -361,6 +362,7 @@ private void ensureStateMaps() {
     state.activeCameraEvents = state.activeCameraEvents ?: [:]
     state.activeZoneEvents = state.activeZoneEvents ?: [:]
     state.zoneChildMap = state.zoneChildMap ?: [:]
+    state.zoneToCameraMap = state.zoneToCameraMap ?: [:]
 }
 
 private void addActiveCameraEvent(String cameraName, String eventId) {
@@ -601,7 +603,8 @@ def initialize() {
     state.activeCameraEvents = state.activeCameraEvents ?: [:]
     state.activeZoneEvents = state.activeZoneEvents ?: [:]
     state.zoneChildMap = state.zoneChildMap ?: [:]
-    
+    state.zoneToCameraMap = state.zoneToCameraMap ?: [:]
+
     // Keep only last 100 event IDs to prevent state from growing too large
     if (state.processedEventIds.size() > 100) {
         state.processedEventIds = state.processedEventIds[-100..-1]
@@ -888,6 +891,48 @@ def handleEventMessage(String message) {
     }
 }
 
+/**
+ * Handle per-zone MQTT count messages for instant zone activation.
+ * Frigate publishes integer object counts to frigate/<zone_name>/<object> topics
+ * ~2-3s before zone data appears in the main events stream.
+ * This provides near-instant zone device activation/deactivation.
+ */
+def handleZoneCountMessage(String sourceName, String objectLabel, int count) {
+    if (!zonesEnabled()) {
+        return
+    }
+
+    // Look up camera name for this zone from the reverse map
+    def cameraName = state.zoneToCameraMap?.get(sourceName)
+    if (!cameraName) {
+        // sourceName might be a camera name (not a zone), skip it
+        return
+    }
+
+    def zoneDevice = getZoneDevice(cameraName, sourceName)
+    if (!zoneDevice) {
+        return
+    }
+
+    if (count > 0) {
+        // Object detected in zone - activate immediately
+        if (objectLabel != "all") {
+            zoneDevice.updateObjectDetection(objectLabel, 0.0G)
+        }
+        zoneDevice.updateMotionState("active")
+        if (debugLogging) {
+            log.debug "Frigate Parent App: Zone count activation - ${sourceName}/${objectLabel} count=${count} (v${appVersion()})"
+        }
+    } else {
+        // Count dropped to zero - do NOT deactivate here
+        // Let the normal events stream handle deactivation via "end" events
+        // This prevents premature clearing when Frigate briefly publishes 0 between detections
+        if (debugLogging) {
+            log.debug "Frigate Parent App: Zone count zero - ${sourceName}/${objectLabel} (deactivation handled by events stream) (v${appVersion()})"
+        }
+    }
+}
+
 def createOrUpdateCameraDevice(String cameraName) {
     def deviceId = "frigate_${cameraName}"
     def childDevice = getChildDevice(deviceId)
@@ -1116,6 +1161,18 @@ def refreshStats() {
                         }
                     }
                     
+                    // Build reverse map of zone name → camera name for per-zone MQTT topic handling
+                    def zoneMap = [:]
+                    validZonesPerCamera.each { camName, zones ->
+                        zones.each { zoneName ->
+                            zoneMap[zoneName] = camName
+                        }
+                    }
+                    state.zoneToCameraMap = zoneMap
+                    if (debugLogging && zoneMap) {
+                        log.debug "Frigate Parent App: Built zoneToCameraMap: ${zoneMap} (v${appVersion()})"
+                    }
+
                     // Only log discovery if cameras changed
                     def previousCameras = state.lastDiscoveredCameras ?: []
                     def currentCameraList = camerasWithMotion.sort()
