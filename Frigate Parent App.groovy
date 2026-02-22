@@ -30,9 +30,10 @@
  * 1.20 - 2026-02-21 - FEATURE: Per-object zone child devices - optional separate devices per object type per zone (e.g., "Back Step - Cat", "Back Step - Dog"). Enables simultaneous tracking of multiple object types in the same zone. Per-object devices deactivate instantly via MQTT count=0 messages. Proactive device creation from Frigate config objects.track lists. Controlled by new "Create per-object zone devices" preference (default off).
  * 1.21 - 2026-02-22 - FIX: Fixed per-object zone device re-activation bug - events stream handleZoneEvents() was calling updateObjectDetection() on per-object devices, which internally re-activated motion after count=0 had cleared it. Per-object devices now only receive metadata from events stream; activation/deactivation is controlled entirely by MQTT count messages for reliable occupancy tracking.
  * 1.22 - 2026-02-22 - PERFORMANCE: Adopted HA Frigate architecture - count topics now drive ALL device state (camera, zone, per-object). Events stream demoted to metadata-only enrichment for "new"/"end" events; all "update" events dropped at bridge level. Camera motion activated/deactivated via frigate/<camera>/all count topic. Zone devices deactivate on count=0 instead of waiting for events stream. Reduces forwarded event volume by ~70-80% and sendEvent calls per message by ~70%.
+ * 1.23 - 2026-02-22 - FIX: Eliminated duplicate motion activation events. Per-object count topics (cat, person, etc.) now only update object detection; motion state driven exclusively by "all" count topic. Fixes race condition where Hubitat sendEvent() async updates caused device.currentValue() to return stale state, resulting in 2x motion/switch/lastUpdate events per detection cycle.
  *
  * @author Simon Mason
- * @version 1.22
+ * @version 1.23
  * @date 2026-02-22
  */
 
@@ -52,7 +53,7 @@ definition(
  * Returns the current app version number
  * This is used in all log statements to ensure version consistency
  */
-String appVersion() { return "1.22" }
+String appVersion() { return "1.23" }
 
 preferences {
     page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
@@ -973,10 +974,13 @@ def handleZoneCountMessage(String sourceName, String objectLabel, int count) {
         def cameraDevice = getChildDevice(deviceId)
         if (cameraDevice) {
             if (count > 0) {
-                if (objectLabel != "all") {
+                if (objectLabel == "all") {
+                    // "all" count topic drives motion state (avoids duplicate activation from per-object topics)
+                    cameraDevice.updateMotionState("active")
+                } else {
+                    // Per-object count topics only update object detection
                     cameraDevice.updateObjectDetection(objectLabel, 0.0G)
                 }
-                cameraDevice.updateMotionState("active")
                 if (debugLogging) {
                     log.debug "Frigate Parent App: Camera count activation - ${sourceName}/${objectLabel} count=${count} (v${appVersion()})"
                 }
@@ -1009,15 +1013,18 @@ def handleZoneCountMessage(String sourceName, String objectLabel, int count) {
     }
 
     if (count > 0) {
-        if (objectLabel != "all") {
+        if (objectLabel == "all") {
+            // "all" count topic drives motion state (avoids duplicate activation from per-object topics)
+            zoneDevice.updateMotionState("active")
+        } else {
+            // Per-object count topics only update object detection on the zone device
             zoneDevice.updateObjectDetection(objectLabel, 0.0G)
         }
-        zoneDevice.updateMotionState("active")
         if (debugLogging) {
             log.debug "Frigate Parent App: Zone count activation - ${sourceName}/${objectLabel} count=${count} (v${appVersion()})"
         }
 
-        // Per-object zone device activation
+        // Per-object zone device activation (only for specific object topics)
         if (perObjectZonesEnabled() && objectLabel != "all") {
             def objDevice = getOrCreateZoneObjectDevice(cameraName, sourceName, objectLabel)
             if (objDevice) {

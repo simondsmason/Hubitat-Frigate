@@ -20,9 +20,10 @@
  * 1.09 - 2026-02-16 - FIXES: Fixed update filter to check for non-empty zone arrays instead of field presence (previous filter was a no-op). Strip path_data from payloads before forwarding to prevent unbounded payload growth. Moved lastMessage event to only fire for event messages, not stats. Removed stats passthrough to parent app (parent discards them).
  * 1.10 - 2026-02-17 - PERFORMANCE: Subscribe to per-zone MQTT topics (frigate/+/+) for instant zone activation. Frigate publishes lightweight integer counts to per-zone topics ~2s before zone data appears in the events stream. Bridge forwards these to parent app for immediate zone device activation, matching Home Assistant response times.
  * 1.11 - 2026-02-22 - PERFORMANCE: Drop all "update" events from events stream - only forward "new" and "end" events to parent. Count topics now drive all device state (matching HA architecture). Reduces forwarded event volume by ~70-80% and eliminates associated CPU work (regex extraction, path_data stripping). Moved lastMessage to only fire for "new"/"end" events.
+ * 1.12 - 2026-02-22 - PERFORMANCE: Removed frigate/stats MQTT subscription (unused; HA also uses HTTP polling for stats). Dropped events QoS from 1 to 0 (matching HA). Simplified count topic parse() with fast-path integer payload check - rejects non-count messages (motion ON/OFF, state topics) immediately without string splits or list lookups.
  *
  * @author Simon Mason
- * @version 1.11
+ * @version 1.12
  * @date 2026-02-22
  */
 
@@ -30,7 +31,7 @@
  * Returns the current driver version number
  * This is used in all log statements to ensure version consistency
  */
-String driverVersion() { return "1.11" }
+String driverVersion() { return "1.12" }
 
 metadata {
     definition (
@@ -217,22 +218,21 @@ def subscribeToTopics() {
     def debugLogging = isDebug()
     
     try {
-        // Subscribe to Frigate stats for camera discovery
-        def statsTopic = "${topicPrefix}/stats"
-        interfaces.mqtt.subscribe(statsTopic, 1)
-        log.info "Frigate MQTT Bridge: Subscribed to ${statsTopic} (v${driverVersion()})"
-        
-        // Subscribe to Frigate events for motion detection
+        // NOTE: Do NOT subscribe to frigate/stats - we don't use it (parent uses HTTP API).
+        // HA integration also skips stats MQTT and polls HTTP /api/stats instead.
+
+        // Subscribe to Frigate events for snapshot/metadata enrichment (new/end only)
+        // QoS 0 matches HA integration - fire-and-forget, no broker ACK overhead
         def eventsTopic = "${topicPrefix}/events"
-        interfaces.mqtt.subscribe(eventsTopic, 1)
+        interfaces.mqtt.subscribe(eventsTopic, 0)
         log.info "Frigate MQTT Bridge: Subscribed to ${eventsTopic} (v${driverVersion()})"
 
-        // Subscribe to per-zone/camera object count topics for instant zone activation
+        // Subscribe to per-zone/camera object count topics for instant activation
         // Frigate publishes integer counts to frigate/<zone_or_camera>/<object> topics
-        // These arrive ~2s before zone data appears in the events stream
+        // Also matches frigate/<camera>/motion (ON/OFF) which parse() filters out
         def zoneCountTopic = "${topicPrefix}/+/+"
         interfaces.mqtt.subscribe(zoneCountTopic, 0)
-        log.info "Frigate MQTT Bridge: Subscribed to ${zoneCountTopic} for per-zone counts (v${driverVersion()})"
+        log.info "Frigate MQTT Bridge: Subscribed to ${zoneCountTopic} for count topics (v${driverVersion()})"
 
         sendEvent(name: "connectionStatus", value: "connected")
         log.info "Frigate MQTT Bridge: MQTT connection established and subscriptions active (v${driverVersion()})"
@@ -263,16 +263,8 @@ def parse(String message) {
             log.debug "Frigate MQTT Bridge: Topic: ${topicPath}, Payload length: ${payload?.size() ?: 0} (v${driverVersion()})"
         }
         
-        // Only update lastMessage for event messages to reduce event queue churn
-        // Stats messages arrive every 60s and don't need to generate device events
-
         // Forward message to parent app based on topic
-        if (topicPath == "${topicPrefix}/stats") {
-            // Stats are not forwarded to parent - parent doesn't use them
-            if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Stats message received (${payload?.size() ?: 0} bytes), not forwarding (v${driverVersion()})"
-            }
-        } else if (topicPath == "${topicPrefix}/events") {
+        if (topicPath == "${topicPrefix}/events") {
             if (debugLogging) {
                 log.debug "Frigate MQTT Bridge: Forwarding event message to parent app (v${driverVersion()})"
             }
@@ -379,36 +371,24 @@ def parse(String message) {
                 def fallbackPayload = payload.replaceAll(/"path_data"\s*:\s*\[[^\]]*\]/, '"path_data":[]')
                 parent?.handleEventMessage(fallbackPayload)
             }
-        } else if (topicPath.startsWith("${topicPrefix}/") && !topicPath.contains("/set") && !topicPath.contains("/state")) {
-            // Per-zone/camera object count topic: frigate/<zone_or_camera>/<object>
-            // Payload is an integer count (e.g. "0", "1", "2")
-            // Filter out control topics (set/state), snapshot topics, audio topics, and other non-count topics
-            def parts = topicPath.split("/")
-            if (parts.size() == 3) {
-                def sourceName = parts[1]  // zone name or camera name
-                def objectLabel = parts[2] // object type (person, cat, dog, car, all)
-
-                // Skip non-count topics: snapshots, motion, audio, review, detect, recordings, etc.
-                def skipSuffixes = ["snapshot", "motion", "audio", "detect", "recordings", "snapshots",
-                                    "enabled", "improve_contrast", "review_status", "ptz", "ptz_autotracker",
-                                    "birdseye", "review_alerts", "review_detections", "notifications", "active"]
-                if (skipSuffixes.contains(objectLabel)) {
-                    return
-                }
-
-                // Payload should be a short integer count
-                if (payload && payload.size() <= 3 && payload.isInteger()) {
-                    def count = payload.toInteger()
-                    if (debugLogging) {
-                        log.debug "Frigate MQTT Bridge: Zone count - ${sourceName}/${objectLabel} = ${count} (v${driverVersion()})"
-                    }
-                    parent?.handleZoneCountMessage(sourceName, objectLabel, count)
-                }
-            }
         } else {
-            if (debugLogging) {
-                log.debug "Frigate MQTT Bridge: Unhandled topic: ${topicPath} (v${driverVersion()})"
+            // Count topic candidate: frigate/<source>/<object> with integer payload
+            // Fast path: count payloads are always 1-3 digit integers, reject everything else immediately
+            if (!payload || payload.size() > 3 || !payload.isInteger()) {
+                return
             }
+            // Only process 3-segment topics (frigate/source/object)
+            def parts = topicPath.split("/")
+            if (parts.size() != 3) {
+                return
+            }
+            def sourceName = parts[1]  // zone name or camera name
+            def objectLabel = parts[2] // object type (person, cat, dog, car, all)
+            def count = payload.toInteger()
+            if (debugLogging) {
+                log.debug "Frigate MQTT Bridge: Count - ${sourceName}/${objectLabel} = ${count} (v${driverVersion()})"
+            }
+            parent?.handleZoneCountMessage(sourceName, objectLabel, count)
         }
         
     } catch (Exception e) {
