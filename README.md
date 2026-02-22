@@ -134,6 +134,8 @@ Then activate security mode
 
 ## Change History
 
+- **1.21** - 2026-02-22 - Parent App: FIX - Fixed per-object zone device re-activation bug where events stream was calling updateObjectDetection() on per-object devices, re-activating motion after count=0 had cleared it. Per-object devices now only receive metadata from events stream; activation/deactivation controlled entirely by MQTT count messages for reliable occupancy tracking.
+- **1.20** - 2026-02-21 - Parent App: FEATURE - Per-object zone child devices - optional separate devices per object type per zone (e.g., "Back Step - Cat", "Back Step - Dog"). Enables simultaneous tracking of multiple object types in the same zone. Per-object devices deactivate instantly via MQTT count=0 messages. Proactive device creation from Frigate config objects.track lists. Controlled by new "Create per-object zone devices" preference (default off).
 - **1.19** - 2026-02-17 - Parent App: PERFORMANCE - Added instant zone activation via per-zone MQTT topics. Frigate publishes lightweight integer counts to per-zone topics ~2-3s before zone data appears in the events stream. Zone devices now activate immediately on first detection, matching Home Assistant response times.
 - **1.10** - 2026-02-17 - MQTT Bridge Device: PERFORMANCE - Subscribe to per-zone MQTT topics (frigate/+/+) for instant zone activation. Forwards lightweight integer count messages to parent app for immediate zone device activation.
 - **1.18** - 2026-02-16 - Parent App: CRITICAL FIX - Fixed zone name extraction bug where Groovy findAll() returned full match strings instead of capture groups, causing all zone names to be truncated to a single letter. Zone devices now receive correct names from Frigate.

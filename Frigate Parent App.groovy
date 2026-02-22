@@ -27,10 +27,12 @@
  * 1.17 - 2026-01-18 - ARCHITECTURE: Removed all MQTT event logging from Parent App. MQTT event logging (motion started, event processed, motion ended) is now handled entirely by MQTT Bridge Device when device debug is enabled. This improves separation of concerns and reduces Parent App log volume during active motion periods.
  * 1.18 - 2026-02-16 - CRITICAL FIX: Fixed zone name extraction bug - Groovy findAll() returns full match strings, not capture groups. zoneMatch[1] was returning the second character of the match (e.g. "e" from "entire_frame_back_garden") instead of the zone name. All zone devices were receiving single-letter names. Fixed by stripping quotes from the full match string.
  * 1.19 - 2026-02-17 - PERFORMANCE: Added handleZoneCountMessage() for instant zone activation via per-zone MQTT topics. Frigate publishes lightweight integer counts to per-zone topics ~2-3s before zone data appears in the events stream. Builds zoneToCameraMap during camera refresh for fast zone-to-camera lookups. Zone devices now activate immediately on first detection, matching Home Assistant response times.
+ * 1.20 - 2026-02-21 - FEATURE: Per-object zone child devices - optional separate devices per object type per zone (e.g., "Back Step - Cat", "Back Step - Dog"). Enables simultaneous tracking of multiple object types in the same zone. Per-object devices deactivate instantly via MQTT count=0 messages. Proactive device creation from Frigate config objects.track lists. Controlled by new "Create per-object zone devices" preference (default off).
+ * 1.21 - 2026-02-22 - FIX: Fixed per-object zone device re-activation bug - events stream handleZoneEvents() was calling updateObjectDetection() on per-object devices, which internally re-activated motion after count=0 had cleared it. Per-object devices now only receive metadata from events stream; activation/deactivation is controlled entirely by MQTT count messages for reliable occupancy tracking.
  *
  * @author Simon Mason
- * @version 1.19
- * @date 2026-02-17
+ * @version 1.21
+ * @date 2026-02-22
  */
 
 definition(
@@ -49,7 +51,7 @@ definition(
  * Returns the current app version number
  * This is used in all log statements to ensure version consistency
  */
-String appVersion() { return "1.19" }
+String appVersion() { return "1.21" }
 
 preferences {
     page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
@@ -68,6 +70,7 @@ preferences {
         
         section("Zones & Metadata") {
             input "enableZoneDevices", "bool", title: "Create zone child devices", required: true, defaultValue: true
+            input "enablePerObjectZoneDevices", "bool", title: "Create per-object zone devices (e.g., separate cat/dog/person per zone)", required: true, defaultValue: false
         }
         
         section("Frigate Server") {
@@ -103,6 +106,10 @@ preferences {
 
 private boolean zonesEnabled() {
     return (settings?.enableZoneDevices != false)
+}
+
+private boolean perObjectZonesEnabled() {
+    return zonesEnabled() && (settings?.enablePerObjectZoneDevices == true)
 }
 
 private List<String> normalizeZoneList(def raw) {
@@ -363,6 +370,8 @@ private void ensureStateMaps() {
     state.activeZoneEvents = state.activeZoneEvents ?: [:]
     state.zoneChildMap = state.zoneChildMap ?: [:]
     state.zoneToCameraMap = state.zoneToCameraMap ?: [:]
+    state.zoneObjectChildMap = state.zoneObjectChildMap ?: [:]
+    state.trackedObjectsPerZone = state.trackedObjectsPerZone ?: [:]
 }
 
 private void addActiveCameraEvent(String cameraName, String eventId) {
@@ -496,6 +505,53 @@ private def getOrCreateZoneDevice(String cameraName, String zoneName) {
     }
 }
 
+private String buildZoneObjectDeviceId(String cameraName, String zoneName, String objectLabel) {
+    return "frigate_${sanitizeForId(cameraName)}_zone_${sanitizeForId(zoneName)}_obj_${sanitizeForId(objectLabel)}"
+}
+
+private String zoneObjectKey(String cameraName, String zoneName, String objectLabel) {
+    return "${cameraName}__${zoneName}__${objectLabel}"
+}
+
+private def getZoneObjectDevice(String cameraName, String zoneName, String objectLabel) {
+    def deviceId = buildZoneObjectDeviceId(cameraName, zoneName, objectLabel)
+    return getChildDevice(deviceId)
+}
+
+private def getOrCreateZoneObjectDevice(String cameraName, String zoneName, String objectLabel) {
+    ensureStateMaps()
+    def deviceId = buildZoneObjectDeviceId(cameraName, zoneName, objectLabel)
+    def existing = getChildDevice(deviceId)
+    if (existing) {
+        return existing
+    }
+
+    def cameraTitle = prettifyCameraName(cameraName)
+    def zoneTitle = prettifyZoneName(zoneName)
+    def objectTitle = objectLabel.capitalize()
+    def label = "${cameraTitle} Camera - ${zoneTitle} - ${objectTitle}"
+    try {
+        def device = addChildDevice("simonmason", "Frigate Camera Device", deviceId, [
+            name       : label,
+            label      : label,
+            isComponent: false
+        ])
+        if (device) {
+            device.updateDataValue("deviceRole", "zoneObject")
+            device.updateDataValue("cameraName", cameraName)
+            device.updateDataValue("zoneName", zoneName)
+            device.updateDataValue("objectLabel", objectLabel)
+            device.updateEventMetadata([cameraName: cameraName, zoneName: zoneName])
+            state.zoneObjectChildMap[zoneObjectKey(cameraName, zoneName, objectLabel)] = deviceId
+            log.info "Frigate Parent App: Created per-object zone device ${label} (v${appVersion()})"
+        }
+        return device
+    } catch (Exception e) {
+        log.error "Frigate Parent App: Failed to create per-object zone device for ${cameraName}/${zoneName}/${objectLabel}: ${e.message} (v${appVersion()})"
+        return null
+    }
+}
+
 private void handleZoneEvents(String cameraName,
                               String eventId,
                               String eventType,
@@ -519,11 +575,18 @@ private void handleZoneEvents(String cameraName,
                     zoneDevice.clearDetections()
                 }
             }
+            // Update per-object device metadata on end (deactivation handled by count=0)
+            if (perObjectZonesEnabled() && label) {
+                def objDevice = getZoneObjectDevice(cameraName, zoneName, label)
+                if (objDevice) {
+                    objDevice.updateEventMetadata(baseMetadata)
+                }
+            }
         }
         state.eventZoneMap.remove(eventId)
         return
     }
-    
+
     def removedZones = previousZones.findAll { !normalizedCurrent.contains(it) }
     removedZones.each { zoneName ->
         removeActiveZoneEvent(cameraName, zoneName, eventId)
@@ -533,24 +596,33 @@ private void handleZoneEvents(String cameraName,
         }
     }
     state.eventZoneMap[eventId] = normalizedCurrent
-    
+
     normalizedCurrent.each { zoneName ->
         def zoneDevice = getOrCreateZoneDevice(cameraName, zoneName)
         if (!zoneDevice) {
             return
         }
         addActiveZoneEvent(cameraName, zoneName, eventId)
-        
+
         def zoneMetadata = [:] << baseMetadata
         zoneMetadata.zoneName = zoneName
         zoneMetadata.currentZones = [zoneName]
         zoneMetadata.enteredZones = normalizedEntered.contains(zoneName) ? [zoneName] : []
-        
+
         zoneDevice.updateEventMetadata(zoneMetadata)
         if (label && eventType != "end") {
             zoneDevice.updateObjectDetection(label, score)
         }
         zoneDevice.updateMotionState("active")
+
+        // Forward metadata only to per-object device (activation/deactivation
+        // is handled by count messages in handleZoneCountMessage)
+        if (perObjectZonesEnabled() && label) {
+            def objDevice = getZoneObjectDevice(cameraName, zoneName, label)
+            if (objDevice) {
+                objDevice.updateEventMetadata(zoneMetadata)
+            }
+        }
     }
 }
 
@@ -604,6 +676,8 @@ def initialize() {
     state.activeZoneEvents = state.activeZoneEvents ?: [:]
     state.zoneChildMap = state.zoneChildMap ?: [:]
     state.zoneToCameraMap = state.zoneToCameraMap ?: [:]
+    state.zoneObjectChildMap = state.zoneObjectChildMap ?: [:]
+    state.trackedObjectsPerZone = state.trackedObjectsPerZone ?: [:]
 
     // Keep only last 100 event IDs to prevent state from growing too large
     if (state.processedEventIds.size() > 100) {
@@ -923,12 +997,36 @@ def handleZoneCountMessage(String sourceName, String objectLabel, int count) {
         if (debugLogging) {
             log.debug "Frigate Parent App: Zone count activation - ${sourceName}/${objectLabel} count=${count} (v${appVersion()})"
         }
+
+        // Per-object zone device activation
+        if (perObjectZonesEnabled() && objectLabel != "all") {
+            def objDevice = getOrCreateZoneObjectDevice(cameraName, sourceName, objectLabel)
+            if (objDevice) {
+                objDevice.updateObjectDetection(objectLabel, 0.0G)
+                objDevice.updateMotionState("active")
+                if (debugLogging) {
+                    log.debug "Frigate Parent App: Per-object zone activation - ${sourceName}/${objectLabel} count=${count} (v${appVersion()})"
+                }
+            }
+        }
     } else {
-        // Count dropped to zero - do NOT deactivate here
+        // Count dropped to zero - do NOT deactivate zone device here
         // Let the normal events stream handle deactivation via "end" events
         // This prevents premature clearing when Frigate briefly publishes 0 between detections
         if (debugLogging) {
             log.debug "Frigate Parent App: Zone count zero - ${sourceName}/${objectLabel} (deactivation handled by events stream) (v${appVersion()})"
+        }
+
+        // Per-object zone devices CAN safely deactivate on count=0
+        // since they track a single object type
+        if (perObjectZonesEnabled() && objectLabel != "all") {
+            def objDevice = getZoneObjectDevice(cameraName, sourceName, objectLabel)
+            if (objDevice) {
+                objDevice.clearDetections()
+                if (debugLogging) {
+                    log.debug "Frigate Parent App: Per-object zone deactivation - ${sourceName}/${objectLabel} count=0 (v${appVersion()})"
+                }
+            }
         }
     }
 }
@@ -1025,80 +1123,109 @@ def removeObsoleteZoneDevices(List currentCameras, Map validZonesPerCamera) {
     if (!zonesEnabled() || !validZonesPerCamera) {
         return
     }
-    
+
     def allChildDevices = getChildDevices()
     def removedCount = 0
-    
+
     allChildDevices.each { device ->
         def dni = device.deviceNetworkId
         if (!dni?.startsWith("frigate_")) {
             return
         }
-        
+
         def remainder = dni.substring("frigate_".length())
-        
+
         // Skip non-zone devices and MQTT bridge
         def zoneIndex = remainder.indexOf("_zone_")
         if (zoneIndex == -1) {
             return
         }
-        
-        // Extract camera name and zone ID part from device ID
+
+        // Extract camera name and zone+object ID part from device ID
         def cameraName = remainder.substring(0, zoneIndex)
-        def zoneIdPart = remainder.substring(zoneIndex + "_zone_".length())
-        
+        def zoneAndObjPart = remainder.substring(zoneIndex + "_zone_".length())
+
         // Only check zones for cameras that still exist
         if (!currentCameras.contains(cameraName)) {
             return // Camera removal is handled by removeObsoleteCameraDevices()
         }
-        
+
         // Get valid zones for this camera
         def validZones = validZonesPerCamera[cameraName] ?: []
-        
-        // Build set of sanitized valid zone IDs for comparison
         def validZoneIds = validZones.collect { sanitizeForId(it) } as Set
-        
-        // Check if this zone device ID matches any valid zone
-        def zoneMatches = validZoneIds.contains(zoneIdPart)
-        
-        // If zone doesn't match any valid zone, rename it
-        if (!zoneMatches) {
-            // Try to get the original zone name from device data, otherwise use the ID part
-            def zoneName = device.getDataValue("zoneName") ?: zoneIdPart.replace('_', ' ')
-            
-            def currentLabel = device.label ?: device.name
-            if (!currentLabel.endsWith("_REMOVED")) {
-                def newLabel = "${currentLabel}_REMOVED"
-                device.setLabel(newLabel)
-                log.info "Frigate Parent App: Renamed obsolete zone device ${dni} to ${newLabel} (zone '${zoneName}' no longer exists for camera '${cameraName}') (v${appVersion()})"
-                removedCount++
+
+        // Check if this is a per-object zone device (contains _obj_)
+        def objIndex = zoneAndObjPart.indexOf("_obj_")
+        if (objIndex > -1) {
+            // Per-object zone device: frigate_<cam>_zone_<zone>_obj_<object>
+            def zoneIdPart = zoneAndObjPart.substring(0, objIndex)
+            def objectIdPart = zoneAndObjPart.substring(objIndex + "_obj_".length())
+
+            def zoneValid = validZoneIds.contains(zoneIdPart)
+            def objectValid = false
+            if (zoneValid) {
+                // Check if object is still tracked for this zone
+                def zoneName = device.getDataValue("zoneName") ?: zoneIdPart.replace('_', ' ')
+                def zKey = zoneKey(cameraName, zoneName)
+                def trackedObjects = (state.trackedObjectsPerZone ?: [:])[zKey] ?: []
+                objectValid = trackedObjects.collect { sanitizeForId(it) }.contains(objectIdPart)
             }
-            
-            // Clean up state maps using the zone key format
-            def zKey = zoneKey(cameraName, zoneName)
-            if (state.activeZoneEvents) {
-                state.activeZoneEvents.remove(zKey)
+
+            if (!zoneValid || (!objectValid && perObjectZonesEnabled())) {
+                def currentLabel = device.label ?: device.name
+                if (!currentLabel.endsWith("_REMOVED")) {
+                    def newLabel = "${currentLabel}_REMOVED"
+                    device.setLabel(newLabel)
+                    log.info "Frigate Parent App: Renamed obsolete per-object zone device ${dni} to ${newLabel} (v${appVersion()})"
+                    removedCount++
+                }
+                // Clean up state map
+                def zoneName = device.getDataValue("zoneName") ?: zoneIdPart.replace('_', ' ')
+                def objectLabel = device.getDataValue("objectLabel") ?: objectIdPart.replace('_', ' ')
+                if (state.zoneObjectChildMap) {
+                    state.zoneObjectChildMap.remove(zoneObjectKey(cameraName, zoneName, objectLabel))
+                }
             }
-            if (state.zoneChildMap) {
-                state.zoneChildMap.remove(zKey)
-            }
-            
-            // Clean up all event zone mappings that reference this zone
-            if (state.eventZoneMap) {
-                state.eventZoneMap.each { eventId, zones ->
-                    if (zones instanceof List && zones.contains(zoneName)) {
-                        zones.remove(zoneName)
-                        if (zones.isEmpty()) {
-                            state.eventZoneMap.remove(eventId)
+        } else {
+            // Regular zone device: frigate_<cam>_zone_<zone>
+            def zoneIdPart = zoneAndObjPart
+            def zoneMatches = validZoneIds.contains(zoneIdPart)
+
+            if (!zoneMatches) {
+                def zoneName = device.getDataValue("zoneName") ?: zoneIdPart.replace('_', ' ')
+
+                def currentLabel = device.label ?: device.name
+                if (!currentLabel.endsWith("_REMOVED")) {
+                    def newLabel = "${currentLabel}_REMOVED"
+                    device.setLabel(newLabel)
+                    log.info "Frigate Parent App: Renamed obsolete zone device ${dni} to ${newLabel} (zone '${zoneName}' no longer exists for camera '${cameraName}') (v${appVersion()})"
+                    removedCount++
+                }
+
+                def zKey = zoneKey(cameraName, zoneName)
+                if (state.activeZoneEvents) {
+                    state.activeZoneEvents.remove(zKey)
+                }
+                if (state.zoneChildMap) {
+                    state.zoneChildMap.remove(zKey)
+                }
+
+                if (state.eventZoneMap) {
+                    state.eventZoneMap.each { eventId, zones ->
+                        if (zones instanceof List && zones.contains(zoneName)) {
+                            zones.remove(zoneName)
+                            if (zones.isEmpty()) {
+                                state.eventZoneMap.remove(eventId)
+                            }
                         }
                     }
                 }
             }
         }
     }
-    
+
     if (removedCount > 0) {
-        log.info "Frigate Parent App: Renamed ${removedCount} obsolete zone device(s) with _REMOVED suffix (v${appVersion()})"
+        log.info "Frigate Parent App: Renamed ${removedCount} obsolete zone/per-object device(s) with _REMOVED suffix (v${appVersion()})"
     }
 }
 
@@ -1202,7 +1329,33 @@ def refreshStats() {
                             }
                         }
                     }
-                    
+
+                    // Proactively create per-object zone devices from Frigate config
+                    if (perObjectZonesEnabled()) {
+                        def trackedMap = [:]
+                        camerasWithMotion.each { cameraName ->
+                            def cameraConfig = config.cameras[cameraName]
+                            def trackedObjects = cameraConfig?.objects?.track ?: []
+                            if (trackedObjects instanceof Collection) {
+                                trackedObjects = trackedObjects.collect { it?.toString() }.findAll { it }
+                            } else {
+                                trackedObjects = []
+                            }
+                            def validZones = validZonesPerCamera[cameraName] ?: []
+                            validZones.each { zoneName ->
+                                def key = zoneKey(cameraName, zoneName)
+                                trackedMap[key] = trackedObjects
+                                trackedObjects.each { objectLabel ->
+                                    getOrCreateZoneObjectDevice(cameraName, zoneName, objectLabel)
+                                }
+                            }
+                        }
+                        state.trackedObjectsPerZone = trackedMap
+                        if (debugLogging) {
+                            log.debug "Frigate Parent App: Built trackedObjectsPerZone: ${trackedMap} (v${appVersion()})"
+                        }
+                    }
+
                     // Rename devices for cameras that no longer have motion detection
                     removeObsoleteCameraDevices(camerasWithMotion)
                     
