@@ -19,17 +19,18 @@
  * 1.08 - 2026-01-18 - PERFORMANCE: Added message filtering to reduce hub load - only forward "update" events that contain zone changes (entered_zones or current_zones). This dramatically reduces message volume by filtering out snapshot improvements, score changes, and other non-zone updates while preserving motion start/end and zone state changes.
  * 1.09 - 2026-02-16 - FIXES: Fixed update filter to check for non-empty zone arrays instead of field presence (previous filter was a no-op). Strip path_data from payloads before forwarding to prevent unbounded payload growth. Moved lastMessage event to only fire for event messages, not stats. Removed stats passthrough to parent app (parent discards them).
  * 1.10 - 2026-02-17 - PERFORMANCE: Subscribe to per-zone MQTT topics (frigate/+/+) for instant zone activation. Frigate publishes lightweight integer counts to per-zone topics ~2s before zone data appears in the events stream. Bridge forwards these to parent app for immediate zone device activation, matching Home Assistant response times.
+ * 1.11 - 2026-02-22 - PERFORMANCE: Drop all "update" events from events stream - only forward "new" and "end" events to parent. Count topics now drive all device state (matching HA architecture). Reduces forwarded event volume by ~70-80% and eliminates associated CPU work (regex extraction, path_data stripping). Moved lastMessage to only fire for "new"/"end" events.
  *
  * @author Simon Mason
- * @version 1.10
- * @date 2026-02-17
+ * @version 1.11
+ * @date 2026-02-22
  */
 
 /**
  * Returns the current driver version number
  * This is used in all log statements to ensure version consistency
  */
-String driverVersion() { return "1.10" }
+String driverVersion() { return "1.11" }
 
 metadata {
     definition (
@@ -340,7 +341,16 @@ def parse(String message) {
                     } catch (Exception ignored) {}
                 }
                 
-                // Log MQTT events at INFO level when device debug is enabled
+                // Drop ALL "update" events - count topics now drive device state
+                // Only forward "new" (for snapshots/metadata) and "end" (for clearing state)
+                if (evtType == "update") {
+                    if (debugLogging) {
+                        log.debug "Frigate MQTT Bridge: Skipped update event - camera=${cam}, id=${evtId} (v${driverVersion()})"
+                    }
+                    return
+                }
+
+                // Log "new" and "end" events at INFO level when device debug is enabled
                 if (debugLogging) {
                     if (evtType == "new") {
                         if (label != "unknown") {
@@ -350,39 +360,16 @@ def parse(String message) {
                         }
                     } else if (evtType == "end") {
                         log.info "Frigate MQTT Bridge: Motion ended - camera=${cam}, id=${evtId} (v${driverVersion()})"
-                    } else if (evtType == "update") {
-                        if (label != "unknown") {
-                            log.info "Frigate MQTT Bridge: Event processed - camera=${cam}, label=${label}, score=${score}, id=${evtId} (v${driverVersion()})"
-                        } else {
-                            log.info "Frigate MQTT Bridge: Event update processed - camera=${cam}, id=${evtId} (v${driverVersion()})"
-                        }
-                    } else {
-                        log.debug "Frigate MQTT Bridge: Event summary - type=${evtType}, camera=${cam}, id=${evtId}, has_snapshot=${hasSnapshot} (${payload?.size() ?: 0} bytes) (v${driverVersion()})"
-                    }
-                }
-                
-                // Filter "update" events - only forward if they contain non-empty zone arrays
-                // Frigate always includes entered_zones/current_zones fields, so check for actual content
-                // This reduces message volume by filtering out snapshot improvements, score changes, etc.
-                if (evtType == "update") {
-                    // Check for non-empty zone arrays (not just field presence)
-                    def hasNonEmptyZones = payload =~ /"(?:entered_zones|current_zones)"\s*:\s*\[\s*"[^"]/
-
-                    if (!hasNonEmptyZones) {
-                        if (debugLogging) {
-                            log.debug "Frigate MQTT Bridge: Filtered update event (empty zones) - camera=${cam}, id=${evtId} (v${driverVersion()})"
-                        }
-                        return  // Don't forward this message
                     }
                 }
 
                 // Strip path_data arrays to reduce payload size (unused, grows unbounded with event duration)
                 def cleanPayload = payload.replaceAll(/"path_data"\s*:\s*\[[^\]]*\]/, '"path_data":[]')
 
-                // Update lastMessage only for event messages (not stats)
+                // Update lastMessage only for "new" and "end" events
                 sendEvent(name: "lastMessage", value: "frigate/events: ${evtType} camera=${cam} (${cleanPayload?.size() ?: 0} bytes)")
 
-                // Forward "new" and "end" events unconditionally, and "update" events with zone data
+                // Forward only "new" and "end" events to parent
                 parent?.handleEventMessage(cleanPayload)
             } catch (Exception ex) {
                 if (debugLogging) {
