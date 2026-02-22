@@ -4,18 +4,19 @@ A comprehensive Hubitat integration for Frigate NVR that provides automatic came
 
 ## Features
 
-- **Automatic Camera Discovery** - Discovers cameras from Frigate config/stats (HTTP API)
-- **Real-time Motion Detection** - Motion and object detection via MQTT events (through an MQTT bridge device)
+- **Automatic Camera Discovery** - Discovers cameras and zones from Frigate config (HTTP API)
+- **Real-time Motion Detection** - Motion activation/deactivation driven by MQTT count topics for instant response
 - **Object Recognition** - Person, car, dog, cat detection with confidence scores
-- **Existing MQTT Integration** - Works with your existing MQTT infrastructure
+- **Zone Devices** - Optional child devices per zone for zone-specific automation
+- **Per-Object Zone Devices** - Optional separate devices per object type per zone (e.g., "Back Step - Cat")
+- **Lightweight Architecture** - Count topics drive all state; events stream used only for metadata/snapshots
 - **HTTP API Access** - Snapshot and stats retrieval from Frigate
-- **Configurable Thresholds** - Confidence and motion timeout settings
+- **Existing MQTT Integration** - Works with your existing MQTT infrastructure
 
 ## Requirements
 
 - Hubitat Elevation Hub
 - Frigate NVR running on your network
-- MQTT broker accessible to both Hubitat and Frigate
 - MQTT broker accessible to both Hubitat and Frigate
 
 ## Installation
@@ -45,7 +46,7 @@ A comprehensive Hubitat integration for Frigate NVR that provides automatic came
 - **Frigate Server IP/Port**: For HTTP API (config/stats/snapshots)
 - **Frigate Username/Password**: If API auth is required
 - **Auto Discovery**: Enabled
-- **Refresh Interval**: Every 60s (fixed schedule)
+- **Refresh Interval**: Daily at 3 AM (automatic schedule)
 
 ### Camera Device Settings
 
@@ -77,17 +78,18 @@ Supports detection of:
 
 Each camera device provides:
 - `motion` - "active" or "inactive"
+- `switch` - "on" or "off" (mirrors motion for rule compatibility)
 - `personDetected` - "yes" or "no"
 - `carDetected` - "yes" or "no"
 - `dogDetected` - "yes" or "no"
 - `catDetected` - "yes" or "no"
 - `confidence` - Detection confidence (0.0-1.0)
 - `objectType` - Type of detected object
-- `lastDetection` - Timestamp of last detection
-- `lastUpdate` - Last device update
-- `snapshotUrl` - Direct URL to latest snapshot
-- `snapshotImage` - Base64 data URI of latest snapshot (for attribute tiles)
-- `image` - Value used by Dashboard Image tile (URL preferred)
+- `lastUpdate` - Last motion state change timestamp
+- `latestSnapshotUrl` - URL to most recent event snapshot
+- `lastMotionSnapshotUrl` - URL to snapshot from last motion event
+- `lastSnapshotUrl` - URL to last snapshot (any source)
+- `image` - Value used by Dashboard Image tile (URL)
 
 ## Commands
 
