@@ -21,9 +21,10 @@
  * 1.10 - 2026-02-17 - PERFORMANCE: Subscribe to per-zone MQTT topics (frigate/+/+) for instant zone activation. Frigate publishes lightweight integer counts to per-zone topics ~2s before zone data appears in the events stream. Bridge forwards these to parent app for immediate zone device activation, matching Home Assistant response times.
  * 1.11 - 2026-02-22 - PERFORMANCE: Drop all "update" events from events stream - only forward "new" and "end" events to parent. Count topics now drive all device state (matching HA architecture). Reduces forwarded event volume by ~70-80% and eliminates associated CPU work (regex extraction, path_data stripping). Moved lastMessage to only fire for "new"/"end" events.
  * 1.12 - 2026-02-22 - PERFORMANCE: Removed frigate/stats MQTT subscription (unused; HA also uses HTTP polling for stats). Dropped events QoS from 1 to 0 (matching HA). Simplified count topic parse() with fast-path integer payload check - rejects non-count messages (motion ON/OFF, state topics) immediately without string splits or list lookups.
+ * 1.13 - 2026-02-23 - PERFORMANCE: Added updateCountSubscriptions() command to replace frigate/+/+ wildcard with specific per-camera/zone topic subscriptions. Parent app sends exact topic list after camera discovery. Matches HA Frigate integration approach: no wildcards, only explicit per-entity subscriptions. Eliminates all non-count MQTT traffic from reaching the bridge.
  *
  * @author Simon Mason
- * @version 1.12
+ * @version 1.13
  * @date 2026-02-22
  */
 
@@ -31,7 +32,7 @@
  * Returns the current driver version number
  * This is used in all log statements to ensure version consistency
  */
-String driverVersion() { return "1.12" }
+String driverVersion() { return "1.13" }
 
 metadata {
     definition (
@@ -56,6 +57,7 @@ metadata {
         command "disconnect"
         command "refresh"
         command "configure", [[name: "broker", type: "STRING"], [name: "port", type: "NUMBER"], [name: "username", type: "STRING"], [name: "password", type: "STRING"], [name: "topicPrefix", type: "STRING"]]
+        command "updateCountSubscriptions", [[name: "topics", type: "STRING", description: "JSON array of specific count topics"]]
     }
 }
 
@@ -242,6 +244,61 @@ def subscribeToTopics() {
     } catch (Exception e) {
         log.error "Frigate MQTT Bridge: Failed to subscribe: ${e.message} (v${driverVersion()})"
         sendEvent(name: "connectionStatus", value: "error")
+    }
+}
+
+/**
+ * Replace the frigate/+/+ wildcard with specific count topic subscriptions.
+ * Called by parent app after camera/zone discovery to subscribe only to topics we need.
+ * Matches HA Frigate integration approach: no wildcards, only explicit per-entity topics.
+ *
+ * @param topicsJson JSON array of topic strings, e.g. ["frigate/back_garden/all","frigate/back_garden/person",...]
+ */
+def updateCountSubscriptions(String topicsJson) {
+    if (!interfaces.mqtt.isConnected()) {
+        log.warn "Frigate MQTT Bridge: Cannot update subscriptions - not connected (v${driverVersion()})"
+        return
+    }
+
+    def topicPrefix = state.topicPrefix ?: "frigate"
+    def debugLogging = isDebug()
+
+    try {
+        def topics = new groovy.json.JsonSlurper().parseText(topicsJson)
+        if (!(topics instanceof List) || topics.isEmpty()) {
+            log.warn "Frigate MQTT Bridge: updateCountSubscriptions called with empty/invalid list (v${driverVersion()})"
+            return
+        }
+
+        // Unsubscribe from wildcard
+        def wildcardTopic = "${topicPrefix}/+/+"
+        try {
+            interfaces.mqtt.unsubscribe(wildcardTopic)
+            if (debugLogging) {
+                log.debug "Frigate MQTT Bridge: Unsubscribed from wildcard ${wildcardTopic} (v${driverVersion()})"
+            }
+        } catch (Exception e) {
+            // May not have been subscribed - that's fine
+            if (debugLogging) {
+                log.debug "Frigate MQTT Bridge: Wildcard unsubscribe note: ${e.message} (v${driverVersion()})"
+            }
+        }
+
+        // Subscribe to each specific topic at QoS 0
+        def count = 0
+        topics.each { topic ->
+            interfaces.mqtt.subscribe(topic.toString(), 0)
+            count++
+        }
+
+        state.specificSubscriptions = true
+        log.info "Frigate MQTT Bridge: Subscribed to ${count} specific count topics (replaced wildcard) (v${driverVersion()})"
+
+        if (debugLogging) {
+            log.debug "Frigate MQTT Bridge: Topics: ${topics.take(10)}${topics.size() > 10 ? '...' : ''} (v${driverVersion()})"
+        }
+    } catch (Exception e) {
+        log.error "Frigate MQTT Bridge: Failed to update subscriptions: ${e.message} (v${driverVersion()})"
     }
 }
 

@@ -31,9 +31,10 @@
  * 1.21 - 2026-02-22 - FIX: Fixed per-object zone device re-activation bug - events stream handleZoneEvents() was calling updateObjectDetection() on per-object devices, which internally re-activated motion after count=0 had cleared it. Per-object devices now only receive metadata from events stream; activation/deactivation is controlled entirely by MQTT count messages for reliable occupancy tracking.
  * 1.22 - 2026-02-22 - PERFORMANCE: Adopted HA Frigate architecture - count topics now drive ALL device state (camera, zone, per-object). Events stream demoted to metadata-only enrichment for "new"/"end" events; all "update" events dropped at bridge level. Camera motion activated/deactivated via frigate/<camera>/all count topic. Zone devices deactivate on count=0 instead of waiting for events stream. Reduces forwarded event volume by ~70-80% and sendEvent calls per message by ~70%.
  * 1.23 - 2026-02-22 - FIX: Eliminated duplicate motion activation events. Per-object count topics (cat, person, etc.) now only update object detection; motion state driven exclusively by "all" count topic. Fixes race condition where Hubitat sendEvent() async updates caused device.currentValue() to return stale state, resulting in 2x motion/switch/lastUpdate events per detection cycle.
+ * 1.24 - 2026-02-23 - PERFORMANCE: After camera discovery, send specific topic list to bridge via updateCountSubscriptions() to replace wildcard. Matches HA approach of subscribing only to needed topics. Eliminates all non-count MQTT traffic from reaching the bridge.
  *
  * @author Simon Mason
- * @version 1.23
+ * @version 1.24
  * @date 2026-02-22
  */
 
@@ -53,7 +54,7 @@ definition(
  * Returns the current app version number
  * This is used in all log statements to ensure version consistency
  */
-String appVersion() { return "1.23" }
+String appVersion() { return "1.24" }
 
 preferences {
     page(name: "mainPage", title: "Frigate Configuration", install: true, uninstall: true) {
@@ -764,6 +765,59 @@ def ensureBridgeConnected() {
     }
 }
 
+/**
+ * Build specific MQTT topic list and send to bridge to replace wildcard subscription.
+ * Matches HA Frigate integration approach: no wildcards, only explicit per-entity topics.
+ *
+ * Topics needed:
+ *   frigate/<camera>/all           - camera activation/deactivation
+ *   frigate/<camera>/<object>      - camera object detection (person, car, dog, cat)
+ *   frigate/<zone>/all             - zone activation/deactivation
+ *   frigate/<zone>/<object>        - zone object detection + per-object device activation
+ */
+def updateBridgeSubscriptions(List cameraNames, Map validZonesPerCamera) {
+    def bridgeDevice = getChildDevice("frigate_mqtt_bridge")
+    if (!bridgeDevice || !bridgeDevice.hasCommand("updateCountSubscriptions")) {
+        if (debugLogging) {
+            log.debug "Frigate Parent App: Bridge device missing or does not support updateCountSubscriptions (v${appVersion()})"
+        }
+        return
+    }
+
+    def topicPrefix = topicPrefix ?: "frigate"
+    def objectTypes = ["all", "person", "car", "dog", "cat"]
+    def topics = []
+
+    // Camera-level topics
+    cameraNames.each { camera ->
+        objectTypes.each { obj ->
+            topics.add("${topicPrefix}/${camera}/${obj}")
+        }
+    }
+
+    // Zone-level topics
+    validZonesPerCamera.each { camera, zones ->
+        zones.each { zone ->
+            objectTypes.each { obj ->
+                topics.add("${topicPrefix}/${zone}/${obj}")
+            }
+        }
+    }
+
+    if (topics.isEmpty()) {
+        log.warn "Frigate Parent App: No topics to subscribe to - camera/zone list empty (v${appVersion()})"
+        return
+    }
+
+    try {
+        def topicsJson = new groovy.json.JsonBuilder(topics).toString()
+        bridgeDevice.updateCountSubscriptions(topicsJson)
+        log.info "Frigate Parent App: Sent ${topics.size()} specific topics to bridge (${cameraNames.size()} cameras, ${validZonesPerCamera.values().flatten().size()} zones) (v${appVersion()})"
+    } catch (Exception e) {
+        log.error "Frigate Parent App: Failed to update bridge subscriptions: ${e.message} (v${appVersion()})"
+    }
+}
+
 def handleStatsMessage(String message) {
     if (debugLogging) {
         log.debug "Frigate Parent App: Received stats message (camera discovery disabled - use manual refresh button) (v${appVersion()})"
@@ -1382,12 +1436,16 @@ def refreshStats() {
 
                     // Rename devices for cameras that no longer have motion detection
                     removeObsoleteCameraDevices(camerasWithMotion)
-                    
+
                     // Rename obsolete zone devices that don't match valid zones from config
                     if (zonesEnabled()) {
                         removeObsoleteZoneDevices(camerasWithMotion, validZonesPerCamera)
                     }
-                    
+
+                    // Update MQTT bridge to use specific topic subscriptions instead of wildcard
+                    // Matches HA approach: subscribe only to topics we actually process
+                    updateBridgeSubscriptions(camerasWithMotion, validZonesPerCamera)
+
                     // Set completion status
                     def cameraCount = camerasWithMotion.size()
                     def statusMsg = camerasChanged ? 
