@@ -136,6 +136,7 @@ Then activate security mode
 
 ## Change History
 
+- **1.24** - 2026-03-17 - Consolidate instruction files into CLAUDE.md
 - **1.23** - 2026-02-22 - Parent App: FIX - Eliminated duplicate motion activation events. Per-object count topics now only update object detection; motion state driven exclusively by "all" count topic. Fixes sendEvent() race condition causing 2x motion/switch/lastUpdate events per detection.
 - **1.12** - 2026-02-22 - MQTT Bridge Device: PERFORMANCE - Removed `frigate/stats` MQTT subscription (unused; HA also uses HTTP polling for stats). Dropped events QoS from 1 to 0 (matching HA). Simplified count topic parse() with fast-path integer payload check — rejects non-count messages (motion ON/OFF, state topics) immediately without string splits or list lookups. Bridge busy % down from 48.5% to 45.3%.
 - **1.22** - 2026-02-22 - Parent App: PERFORMANCE - Camera motion now driven by count topics (`frigate/<camera>/all`) instead of events stream. Dropped `updateObjectDetection()` and `updateMotionState()` calls from event handlers — count topics handle all device state. Events stream demoted to metadata-only for "new" and "end" events. Reduces sendEvent calls per message from ~32 to ~10 on camera devices.
