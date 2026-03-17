@@ -159,6 +159,7 @@ Then activate security mode
 - **1.09** - 2025-11-08 - Parent App: Guarded MQTT event/zone state maps to prevent null pointer errors during processing
 - **1.08** - 2025-11-08 - Parent App: Zone child devices, richer event metadata, HTTP snapshot URL handling
 - **1.07** - 2025-11-07 - Parent App: Added automatic MQTT bridge reconnection, improved event normalization, and safe confidence parsing
+- **1.08** - 2026-03-17 - Consolidate instruction files into CLAUDE.md
 - **1.08** - Camera Device: CRITICAL PERFORMANCE FIX - Optimized event sending to only send events when values actually change, preventing LimitExceededException errors. Reduced event queue pressure by ~70%.
 - **1.07** - Camera Device: Added version attribute to device state; fixed unix timestamp formatting for lastEventStart and lastEventEnd to display as readable dates
 - **1.06** - MQTT Bridge driver: Debug decoupled from Parent App; independent debug toggles
